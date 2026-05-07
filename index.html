@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NexAI Infinity</title>
+  <link rel="icon" type="image/png" href="assets/favicon.png?v=3">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+  <!-- Visualization Libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts-gl@2.0.9/dist/echarts-gl.min.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Google Calendar API -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="https://apis.google.com/js/api.js" async defer></script>
+  <!-- Firebase Compat SDK (works as regular scripts) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-storage-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-analytics-compat.js"></script>
+</head>
+<body class="dark-mode">
+  <div class="app-container">
+    <aside class="sidebar" style="display: none;">
+      <div class="sidebar-brand">
+        <img src="assets/logo.png" alt="NexAI Logo" class="brand-logo-img" onerror="this.onerror=null; this.outerHTML='<div class=\'brand-logo\'>∞</div>';">
+        <h2>NexAI Infinity</h2>
+      </div>
+      <nav class="sidebar-nav">
+        <!-- Navigation will be injected by js/app.js -->
+      </nav>
+    </aside>
+    
+    <main class="main-content" style="display: none;">
+      <header class="top-header">
+        <h1 id="page-title">Dashboard</h1>
+        <div class="user-profile"></div>
+      </header>
+      
+      <div id="app-view" class="view-container">
+        <!-- Dynamic content injected here -->
+      </div>
+    </main>
+  </div>
+
+  <!-- Portal for login overlay & modals (MUST be outside .main-content) -->
+  <div id="modal-portal"></div>
+
+  <!-- PDF.js for Universal Bill Reading -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+  
+  <script src="js/libs/pdf_storage.js"></script>
+  <script src="js/firebase-config.js"></script>
+  <script src="js/state.js"></script>
+  <script src="js/pages/login.js"></script>
+  <script src="js/pages/dashboard.js"></script>
+  <script src="js/pages/catalog.js"></script>
+  <script src="js/pages/inventory.js"></script>
+  <script src="js/pages/inventory_logs.js"></script>
+  <script src="js/pages/inventory_services.js"></script>
+  <script src="js/pages/schedule.js"></script>
+  <script src="js/pages/hub_activity.js"></script>
+  <script src="js/pages/invoices.js"></script>
+  <script src="js/data/malaysia_geo.js"></script>
+  <script src="js/pages/customers.js?v=5"></script>
+  <script src="js/pages/dong_zhuo.js"></script>
+  <script src="js/pages/agents.js"></script>
+  <script src="js/pages/reports.js"></script>
+  <script src="js/pages/user_log.js?v=2"></script>
+  <script src="js/app.js?v=2"></script>
+</body>
+</html>
