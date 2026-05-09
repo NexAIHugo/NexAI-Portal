@@ -489,7 +489,14 @@ window.Pages.user_log = {
         btn.disabled = true;
 
         try {
-          if (window.resetSpecificModules) {
+          if (window.resetFirestoreModules) {
+            await window.resetFirestoreModules(selected);
+            // Force local state reload and re-render since our own updates don't trigger the listener
+            if (window.loadStateFromFirestore) {
+                await window.loadStateFromFirestore();
+                window.dispatchEvent(new CustomEvent('re-render-view', { detail: window.currentView }));
+            }
+          } else if (window.resetSpecificModules) {
             await window.resetSpecificModules(selected);
           }
           overlay.remove();

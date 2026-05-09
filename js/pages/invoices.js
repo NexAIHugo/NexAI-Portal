@@ -175,7 +175,7 @@ window.Pages.invoices = {
     if (this.searchQuery) {
       const q = this.searchQuery.toLowerCase();
       invoicesData = invoicesData.filter(inv => {
-        return (inv.id || "").toLowerCase().includes(q) || (inv.customerName || "").toLowerCase().includes(q);
+        return (inv.id || "").toLowerCase().includes(q) || (inv.customerName || "").toLowerCase().includes(q) || (inv.salesAgent || "").toLowerCase().includes(q);
       });
     }
 
@@ -214,7 +214,14 @@ window.Pages.invoices = {
             ${invoicesData.length > 0 ? invoicesData.map(inv => {
                 return `
                   <tr style="border-bottom: 1px solid var(--border-color);">
-                    <td style="padding: 14px 12px; font-weight: 700;">${inv.id}</td>
+                    <td style="padding: 14px 12px;">
+                      <div style="display: inline-block; max-width: 100%; position: relative;">
+                        <div style="font-weight: 700; line-height: 1.2;">${inv.id}</div>
+                        ${inv.salesAgent 
+                          ? `<div style="color:var(--primary); font-size:0.55rem; font-weight:800; position: absolute; top: 100%; left: 0; margin-top: 2px; white-space: nowrap;">👤 ${inv.salesAgent}</div>` 
+                          : ''}
+                      </div>
+                    </td>
                     <td style="padding: 14px 12px;">${inv.loadedDate || '—'}</td>
                     <td style="padding: 14px 12px;">${inv.date}</td>
                     <td style="padding: 14px 12px;">
@@ -299,6 +306,13 @@ window.Pages.invoices = {
                <div style="flex:1;">
                   <label style="display:block; font-size: 0.85rem; color:var(--text-muted); margin-bottom: 6px; font-weight: 500;">PIC Name</label>
                   <input type="text" id="edit-inv-pic" value="${inv.picName || ''}" style="width:100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-main); color: var(--text-main); font-weight: 600; outline: none;" />
+               </div>
+            </div>
+
+            <div style="display:flex; gap:15px; margin-bottom: 24px;">
+               <div style="flex:1;">
+                  <label style="display:block; font-size: 0.85rem; color:var(--text-muted); margin-bottom: 6px; font-weight: 500;">Sales Agent</label>
+                  <input type="text" id="edit-inv-sales" value="${inv.salesAgent || ''}" style="width:100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-main); color: var(--text-main); font-weight: 600; outline: none;" />
                </div>
             </div>
 
@@ -469,6 +483,8 @@ window.Pages.invoices = {
              <p style="font-size: 1.2rem; font-weight: 800;">${data.invoiceNo}</p>
              <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 15px; margin-bottom: 4px;">DATE</p>
              <p style="font-size: 1.2rem; font-weight: 700;">${data.date}</p>
+             <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 15px; margin-bottom: 4px;">SALES AGENT</p>
+             <p style="font-size: 1.1rem; font-weight: 700; color:#00b8ff;">${data.salesAgent ? `🧑‍💼 ${data.salesAgent}` : '<span style="color:var(--text-muted); opacity:0.5;">Not Detected</span>'}</p>
            </div>
         </div>
 
@@ -697,12 +713,15 @@ window.Pages.invoices = {
         directAmendBtn.onclick = () => {
            const inv = window.AppState.invoices.find(i => i.id === this.editingId);
            if (inv) {
-               const custInp = document.getElementById('edit-inv-customer');
-               const picInp = document.getElementById('edit-inv-pic');
-               if (custInp) inv.customerName = custInp.value;
-               if (picInp) inv.picName = picInp.value;
+                const custInp = document.getElementById('edit-inv-customer');
+                const picInp = document.getElementById('edit-inv-pic');
+                const salesInp = document.getElementById('edit-inv-sales');
+                if (custInp) inv.customerName = custInp.value;
+                if (picInp) inv.picName = picInp.value;
+                if (salesInp) inv.salesAgent = salesInp.value;
            }
            this.editingId = null; 
+           if (inv && window.saveInvoiceToFirestore) window.saveInvoiceToFirestore(inv);
            this.triggerUpdate();
         };
       }
@@ -921,6 +940,7 @@ window.Pages.invoices = {
     })).sort((a,b) => b.name.length - a.name.length);
     const ivMatch = text.match(/No\.\s*(IV-\d+)/i);
     const dateMatch = text.match(/Date\s+([0-9/]{8,10})/i);
+    const salesMatch = text.match(/Sales\s+([A-Za-z][A-Za-z\s]{0,30}?)(?:\s*$|\s{2,})/m);
     const clientMatch = text.match(/Bill To\s+([\s\S]+)/i);
     
     const itemsFound = [];
@@ -1008,6 +1028,7 @@ window.Pages.invoices = {
       customerId: 'c1',
       customerName: cName,
       picName: picName,
+      salesAgent: salesMatch ? salesMatch[1].trim() : '',
       items: itemsFound
     };
   },
@@ -1062,6 +1083,7 @@ window.Pages.invoices = {
           customerId: d.customerId, 
           customerName: d.customerName,
           picName: d.picName,
+          salesAgent: d.salesAgent || '',
           agentId: 'a1', 
           totalSales: totalS, 
           totalCost: totalC, 
@@ -1089,7 +1111,7 @@ window.Pages.invoices = {
             source: 'NexInvoice Upload (Inv# ' + d.invoiceNo + ')',
             date: new Date().toISOString(),
             area: hardwareAreas.join(', ') || 'Unknown',
-            agent: 'Agent 1',
+            agent: d.salesAgent || 'Agent 1',
             items: activityItems,
             createdBy: window.AppState.user.displayName
           });

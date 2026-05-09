@@ -367,7 +367,7 @@ window.Pages.inventory_activity = {
                   </div>
                   <div style="font-size: 0.8rem; color: var(--text-muted);">
                     <span style="font-weight: 700;">📍 Area: <span style="color: var(--primary);">${act.area}</span></span>
-                    <span style="margin-left: 16px;">👤 Agent: ${act.agent || 'Agent 1'}</span>
+                    <span style="margin-left: 16px;">👤 Agent: <span style="color: #00b8ff; font-weight: 700;">${act.agent || 'Agent 1'}</span></span>
                     <span style="margin-left: 16px; color: #ffcc00; font-weight: 800;">🛠️ Created By: ${act.createdBy || 'System'}</span>
                     <span style="margin-left: 10px; color: var(--text-muted); font-size: 0.75rem; font-weight: 600;">📅 ${formatDateStr(act.date)}</span>
                   </div>

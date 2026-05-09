@@ -66,8 +66,10 @@ window.Pages.customers = {
   },
 
   toTitleCase: function(str) {
-    if (!str || str === '-' || typeof str !== 'string') return '-';
-    return str.toLowerCase().split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+    if (!str || typeof str !== 'string') return '-';
+    const trimmed = str.trim();
+    if (!trimmed || trimmed === '-' || trimmed === '=' || trimmed.length <= 1) return '-';
+    return trimmed.toLowerCase().split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
   },
 
   getDateRange: function() {
@@ -130,8 +132,8 @@ window.Pages.customers = {
       if (normalized === 'Wp Labuan' || normalized === 'Wilayah Persekutuan Labuan' || normalized === 'Labuan') normalized = 'Kuala Lumpur';
       if (normalized === 'Selangor Darul Ehsan') normalized = 'Selangor';
       if (normalized === "Johor Darul Ta'zim" || normalized === "Johor Darul Ta'Zim" || normalized === 'Johor Darul Takzim') normalized = 'Johor';
-      if (normalized === 'Pahang Darul Makmur' || normalized === 'Cameron Highlands') normalized = 'Pahang';
-      if (normalized === 'Kampar') normalized = 'Perak';
+      if (normalized === 'Pahang Darul Makmur' || normalized === 'Cameron Highlands' || normalized === 'Cameron Highland') normalized = 'Pahang';
+      if (normalized === 'Kampar' || normalized === 'Ipoh') normalized = 'Perak';
       return {
         ...c,
         normalizedState: normalized
@@ -218,8 +220,8 @@ window.Pages.customers = {
       if (key === 'Wp Labuan' || key === 'Wilayah Persekutuan Labuan' || key === 'Labuan') key = 'Kuala Lumpur';
       if (key === 'Selangor Darul Ehsan') key = 'Selangor';
       if (key === "Johor Darul Ta'zim" || key === "Johor Darul Ta'Zim" || key === 'Johor Darul Takzim') key = 'Johor';
-      if (key === 'Pahang Darul Makmur' || key === 'Cameron Highlands') key = 'Pahang';
-      if (key === 'Kampar') key = 'Perak';
+      if (key === 'Pahang Darul Makmur' || key === 'Cameron Highlands' || key === 'Cameron Highland') key = 'Pahang';
+      if (key === 'Kampar' || key === 'Ipoh') key = 'Perak';
       if (stats[key] !== undefined) {
         stats[key]++;
       } else {
@@ -1149,9 +1151,11 @@ window.Pages.customers = {
         // Also update the table filter if a state is selected
         if (this.selectedState) {
           this.filterState = (this.selectedState === 'Penang') ? 'Penang' : this.selectedState;
+          this.statusFilter = 'active'; // Region only counts active, so match the table
           this.currentPage = 1;
         } else {
           this.filterState = 'All States';
+          this.statusFilter = 'all';
         }
         
         this.triggerUpdate();
@@ -1395,9 +1399,12 @@ window.Pages.customers = {
 
     const idx = (window.AppState.customers || []).findIndex(c => c.id === id);
     if (idx !== -1) {
+      const existing = window.AppState.customers[idx];
+      const stateChanged = state !== (existing.state || '').trim();
       window.AppState.customers[idx] = {
-        ...window.AppState.customers[idx],
-        name, resId, state, subExpiry: expiry ? expiry + 'T00:00:00.000Z' : null, licenseUrl
+        ...existing,
+        name, resId, state, subExpiry: expiry ? expiry + 'T00:00:00.000Z' : null, licenseUrl,
+        _stateEdited: stateChanged ? true : (existing._stateEdited || false)
       };
       if (window.saveState) window.saveState();
       this.editingCustomerId = null;
@@ -1485,9 +1492,16 @@ window.Pages.customers = {
 
       if (existingIdx !== -1) {
         // Update heartbeat and expiry for existing customer
+        // PRESERVE locally-edited fields (state, licenseUrl) — only update API-sourced fields
+        const existing = window.AppState.customers[existingIdx];
         window.AppState.customers[existingIdx] = { 
-          ...window.AppState.customers[existingIdx], 
-          ...data 
+          ...existing, 
+          name: data.name,
+          resId: data.resId,
+          subExpiry: data.subExpiry,
+          posHeartbeat: data.posHeartbeat,
+          // Only overwrite state if user never manually edited it (still matches API default)
+          state: existing._stateEdited ? existing.state : data.state
         };
         skipped++;
       } else {
