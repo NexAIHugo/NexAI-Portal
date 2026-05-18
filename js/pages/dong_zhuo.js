@@ -948,6 +948,14 @@ window.Pages.dong_zhuo = {
         const idx = (window.AppState.dongZhuoCustomers || []).findIndex(c => c.id === id);
         if (idx !== -1) {
           window.AppState.dongZhuoCustomers[idx].inactive = !e.target.checked;
+          const c = window.AppState.dongZhuoCustomers[idx];
+          
+          // ⚡ DELTA SYNC
+          if (window.firebaseDb) {
+              window.firebaseDb.collection("dong_zhuo_module").doc("data").collection("list").doc(c.id).set(c)
+                .then(() => { if(window.syncStateToFirestore) window.syncStateToFirestore(true); })
+                .catch(err => console.error("Toggle Status Delta Sync Error:", err));
+          }
           if (window.saveState) window.saveState();
           this.triggerUpdate();
         }
@@ -1077,24 +1085,58 @@ window.Pages.dong_zhuo = {
     // Bulk Status Actions
     const btnBulkActivate = document.getElementById('btn-bulk-activate');
     if (btnBulkActivate) {
-      btnBulkActivate.onclick = () => {
+      btnBulkActivate.onclick = async () => {
+        const changedDocs = [];
         (window.AppState.dongZhuoCustomers || []).forEach(c => {
-          if (this.selectedIds.includes(c.id)) c.inactive = false;
+          if (this.selectedIds.includes(c.id)) {
+             c.inactive = false;
+             changedDocs.push(c);
+          }
         });
         this.selectedIds = [];
         if (window.saveState) window.saveState();
+        
+        // ⚡ DELTA SYNC BATCH
+        if (window.firebaseDb && changedDocs.length > 0) {
+            try {
+               const db = window.firebaseDb;
+               const batch = db.batch();
+               changedDocs.forEach(c => {
+                   batch.set(db.collection("dong_zhuo_module").doc("data").collection("list").doc(c.id), c);
+               });
+               await batch.commit();
+               if(window.syncStateToFirestore) window.syncStateToFirestore(true);
+            } catch(e) { console.error("Bulk Activate Delta Sync Error:", e); }
+        }
         this.triggerUpdate();
       };
     }
 
     const btnBulkDeactivate = document.getElementById('btn-bulk-deactivate');
     if (btnBulkDeactivate) {
-      btnBulkDeactivate.onclick = () => {
+      btnBulkDeactivate.onclick = async () => {
+        const changedDocs = [];
         (window.AppState.dongZhuoCustomers || []).forEach(c => {
-          if (this.selectedIds.includes(c.id)) c.inactive = true;
+          if (this.selectedIds.includes(c.id)) {
+             c.inactive = true;
+             changedDocs.push(c);
+          }
         });
         this.selectedIds = [];
         if (window.saveState) window.saveState();
+        
+        // ⚡ DELTA SYNC BATCH
+        if (window.firebaseDb && changedDocs.length > 0) {
+            try {
+               const db = window.firebaseDb;
+               const batch = db.batch();
+               changedDocs.forEach(c => {
+                   batch.set(db.collection("dong_zhuo_module").doc("data").collection("list").doc(c.id), c);
+               });
+               await batch.commit();
+               if(window.syncStateToFirestore) window.syncStateToFirestore(true);
+            } catch(e) { console.error("Bulk Deactivate Delta Sync Error:", e); }
+        }
         this.triggerUpdate();
       };
     }
@@ -1110,11 +1152,20 @@ window.Pages.dong_zhuo = {
 
     const idx = (window.AppState.dongZhuoCustomers || []).findIndex(c => c.id === id);
     if (idx !== -1) {
-      window.AppState.dongZhuoCustomers[idx] = {
+      const updatedCustomer = {
         ...window.AppState.dongZhuoCustomers[idx],
         name, resId, state, subExpiry: expiry ? expiry + 'T00:00:00.000Z' : null, licenseUrl
       };
+      window.AppState.dongZhuoCustomers[idx] = updatedCustomer;
+      
+      // ⚡ DELTA SYNC
+      if (window.firebaseDb) {
+        window.firebaseDb.collection("dong_zhuo_module").doc("data").collection("list").doc(updatedCustomer.id).set(updatedCustomer)
+          .then(() => { if(window.syncStateToFirestore) window.syncStateToFirestore(true); }) // silent metadata ping
+          .catch(e => console.error("Delta Sync Edit Error:", e));
+      }
       if (window.saveState) window.saveState();
+      
       this.editingCustomerId = null;
       this.triggerUpdate();
     }
@@ -1134,8 +1185,16 @@ window.Pages.dong_zhuo = {
       else if (duration === '6m') currentExpiry.setMonth(currentExpiry.getMonth() + 6);
       else if (duration === '1y') currentExpiry.setFullYear(currentExpiry.getFullYear() + 1);
 
-      window.AppState.dongZhuoCustomers[idx].subExpiry = currentExpiry.toISOString();
+      customer.subExpiry = currentExpiry.toISOString();
+      
+      // ⚡ DELTA SYNC
+      if (window.firebaseDb) {
+        window.firebaseDb.collection("dong_zhuo_module").doc("data").collection("list").doc(customer.id).set(customer)
+          .then(() => { if(window.syncStateToFirestore) window.syncStateToFirestore(true); })
+          .catch(e => console.error("Delta Sync Renew Error:", e));
+      }
       if (window.saveState) window.saveState();
+      
       this.renewCustomerId = null;
       this.renewDuration = '1y';
       this.triggerUpdate();
@@ -1161,9 +1220,8 @@ window.Pages.dong_zhuo = {
         total = data.totalCount || 0; skip += limit;
         this.importFeedback = `Syncing: ${allItems.length} / ${total}`; this.triggerUpdate();
       }
-      this.processBatch(allItems);
-      // Push to Firestore so data persists across refreshes
-      if (window.syncStateToFirestore) await window.syncStateToFirestore();
+      await this.processBatch(allItems);
+      
       this.isSyncing = false;
       this.isImportModalOpen = false;
       this.showSuccessPrompt = true;
@@ -1173,11 +1231,18 @@ window.Pages.dong_zhuo = {
 
   deleteCustomer: function(id) {
     window.AppState.dongZhuoCustomers = (window.AppState.dongZhuoCustomers || []).filter(c => c.id !== id);
+    
+    // ⚡ DELTA SYNC
+    if (window.firebaseDb) {
+        window.firebaseDb.collection("dong_zhuo_module").doc("data").collection("list").doc(id).delete()
+          .then(() => { if(window.syncStateToFirestore) window.syncStateToFirestore(true); })
+          .catch(e => console.error("Delta Sync Delete Error:", e));
+    }
     if (window.saveState) window.saveState();
     this.triggerUpdate();
   },
 
-  processBatch: function(resources) {
+  processBatch: async function(resources) {
     let added = 0;
     let skipped = 0;
 
@@ -1185,6 +1250,8 @@ window.Pages.dong_zhuo = {
     if (window.AppState.dongZhuoCustomers) {
       window.AppState.dongZhuoCustomers.forEach(c => c.isNew = false);
     }
+
+    const changedDocs = [];
 
     resources.forEach(res => {
       const resId = res._id || res.id; if (!resId) return;
@@ -1200,24 +1267,51 @@ window.Pages.dong_zhuo = {
 
       if (existingIdx !== -1) {
         // Update heartbeat and expiry for existing customer
-        window.AppState.dongZhuoCustomers[existingIdx] = { 
+        const updated = { 
           ...window.AppState.dongZhuoCustomers[existingIdx], 
           ...data 
         };
+        window.AppState.dongZhuoCustomers[existingIdx] = updated;
+        changedDocs.push(updated);
         skipped++;
       } else {
         // Add new customer
         if (!window.AppState.dongZhuoCustomers) window.AppState.dongZhuoCustomers = [];
-        window.AppState.dongZhuoCustomers.push({ 
+        const newCust = { 
           id: 'c-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5), 
           ...data,
           isNew: true 
-        });
+        };
+        window.AppState.dongZhuoCustomers.push(newCust);
+        changedDocs.push(newCust);
         added++;
       }
     });
     this.lastImportStats = { added, skipped };
     if (window.saveState) window.saveState();
+    
+    // ⚡ DELTA SYNC BATCH UPDATE
+    if (window.firebaseDb && changedDocs.length > 0) {
+       try {
+           const db = window.firebaseDb;
+           // Firestore batch has a limit of 500 operations, so we chunk it
+           const chunks = [];
+           for (let i = 0; i < changedDocs.length; i += 400) chunks.push(changedDocs.slice(i, i + 400));
+           
+           for (const chunk of chunks) {
+               const batch = db.batch();
+               chunk.forEach(docData => {
+                   const ref = db.collection("dong_zhuo_module").doc("data").collection("list").doc(docData.id);
+                   batch.set(ref, docData);
+               });
+               await batch.commit();
+           }
+           if(window.syncStateToFirestore) window.syncStateToFirestore(true);
+           console.log("⚡ Delta Sync complete for Dong Zhuo Batch Fetch");
+       } catch (e) {
+           console.error("Dong Zhuo Delta Sync Batch Error:", e);
+       }
+    }
   },
 
   triggerUpdate: function() { window.dispatchEvent(new CustomEvent('re-render-view', { detail: 'dong_zhuo' })); }

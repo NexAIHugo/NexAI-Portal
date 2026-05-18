@@ -14,6 +14,7 @@ firebase.initializeApp(firebaseConfig);
 
 window.firebaseAuth = firebase.auth();
 window.firebaseDb = firebase.firestore();
+
 try {
   window.firebaseStorage = firebase.storage();
 } catch (e) {

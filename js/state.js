@@ -150,6 +150,11 @@ window.saveState = function() {
 };
 
 window.resetSpecificModules = async function(modules) {
+   modules = modules || [];
+   if (modules.includes('invoices') && !modules.includes('inventory')) {
+     modules = modules.concat('inventory');
+   }
+
    const timestamp = new Date().toISOString();
    const userEmail = window.AppState.user ? window.AppState.user.email : 'System';
 
@@ -163,6 +168,10 @@ window.resetSpecificModules = async function(modules) {
      window.AppState.hubActivities = [];
      window.AppState.inventoryLogs = [];
      window.AppState.inventory.forEach(inv => { inv.quantity = 0; });
+     if (window.incInventoryVersion) window.incInventoryVersion();
+     if (window.Pages && window.Pages.inventory && window.Pages.inventory._invalidateCache) {
+       window.Pages.inventory._invalidateCache();
+     }
    }
 
    if (modules.includes('feedme')) {

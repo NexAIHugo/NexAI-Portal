@@ -489,15 +489,15 @@ window.Pages.user_log = {
         btn.disabled = true;
 
         try {
-          if (window.resetFirestoreModules) {
+          if (window.resetSpecificModules) {
+            await window.resetSpecificModules(selected);
+          } else if (window.resetFirestoreModules) {
             await window.resetFirestoreModules(selected);
-            // Force local state reload and re-render since our own updates don't trigger the listener
             if (window.loadStateFromFirestore) {
                 await window.loadStateFromFirestore();
+                window.saveState && window.saveState();
                 window.dispatchEvent(new CustomEvent('re-render-view', { detail: window.currentView }));
             }
-          } else if (window.resetSpecificModules) {
-            await window.resetSpecificModules(selected);
           }
           overlay.remove();
           alert('System data updated. The selected module has been cleared.');

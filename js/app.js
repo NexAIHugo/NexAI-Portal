@@ -2,6 +2,27 @@
 window.currentView = 'dashboard';
 window._profileMenuOpen = false;
 
+window.getGoogleCalendarTokenKey = function(user) {
+    const activeUser = user || window.AppState?.user || window.firebaseAuth?.currentUser;
+    const identifier = activeUser?.uid || activeUser?.id || activeUser?.email || 'anonymous';
+    return 'google_access_token_' + identifier;
+};
+
+window.getGoogleCalendarToken = function(user) {
+    return localStorage.getItem(window.getGoogleCalendarTokenKey(user));
+};
+
+window.setGoogleCalendarToken = function(token, user) {
+    if (!token) return;
+    localStorage.setItem(window.getGoogleCalendarTokenKey(user), token);
+    localStorage.removeItem('google_access_token');
+};
+
+window.clearGoogleCalendarToken = function(user) {
+    localStorage.removeItem(window.getGoogleCalendarTokenKey(user));
+    localStorage.removeItem('google_access_token');
+};
+
 // --- AUTHENTICATION & USER PROFILE ---
 
 window.handleGoogleLogin = async function() {
@@ -9,19 +30,15 @@ window.handleGoogleLogin = async function() {
         const result = await window.firebaseAuth.signInWithPopup(window.googleProvider);
         
         // CHECK: Verify if Google Calendar scope was granted
-        const scopes = result.additionalUserInfo.profile.granted_scopes || "";
-        const hasCalendar = scopes.includes('calendar.events');
-        
-        if (!hasCalendar) {
-            alert("Permission Denied: You MUST allow NexAI Hub to access your Google Calendar to proceed. Please sign in again and ensure you tick the 'Google Calendar' checkbox.");
-            await window.firebaseAuth.signOut();
-            return;
-        }
-        
+        // Note: Firebase does not reliably return granted_scopes in additionalUserInfo.profile
         const credential = result.credential;
+        
         if (credential && credential.accessToken) {
-            localStorage.setItem('google_access_token', credential.accessToken);
+            window.setGoogleCalendarToken(credential.accessToken, result.user);
+        } else {
+            console.warn("No access token returned from Google. Calendar features may be restricted.");
         }
+        
         await checkAndCreateUserProfile(result.user);
     } catch (error) {
         console.error("Login Error:", error);
@@ -30,10 +47,11 @@ window.handleGoogleLogin = async function() {
 };
 
 window.handleLogout = function() {
+    const currentUser = window.AppState.user || window.firebaseAuth.currentUser;
     window.firebaseAuth.signOut().then(function() {
         window.AppState.user = null;
         window._profileMenuOpen = false;
-        localStorage.removeItem('google_access_token');
+        window.clearGoogleCalendarToken(currentUser);
         window.AppState.isGoogleLinked = false;
         window.saveState();
         renderApp();
@@ -47,8 +65,13 @@ async function checkAndCreateUserProfile(user) {
 
     if (!userSnap.exists) {
         // Check if first user
-        var usersSnap = await db.collection("users").get();
-        var isFirstUser = usersSnap.empty;
+        var isFirstUser = false;
+        try {
+            var usersSnap = await db.collection("users").limit(1).get();
+            isFirstUser = usersSnap.empty;
+        } catch (e) {
+            console.warn("Could not check if first user, defaulting to Guest.", e);
+        }
 
         var newUser = {
             id: user.uid,
@@ -71,7 +94,11 @@ async function checkAndCreateUserProfile(user) {
             await window.firebaseAuth.signOut();
             throw new Error("User account disabled");
         }
-        await userRef.update({ lastLogin: new Date().toISOString() });
+        try {
+            await userRef.update({ lastLogin: new Date().toISOString() });
+        } catch (updateErr) {
+            console.warn("Could not update lastLogin timestamp.", updateErr);
+        }
         window.AppState.user = userData;
     }
 }
@@ -153,7 +180,7 @@ async function performChunkedBatch(collectionRef, items, operation = 'set') {
     }
 }
 
-window.syncStateToFirestore = async function() {
+window.syncStateToFirestore = async function(silent = false) {
     if (!window.AppState.user || window.AppState.isCloudSyncing) return;
     try {
         window.AppState.isCloudSyncing = true;
@@ -161,7 +188,7 @@ window.syncStateToFirestore = async function() {
         const timestamp = new Date().toISOString();
         const userEmail = (window.AppState.user.email || 'system').toLowerCase();
 
-        // 1. Update Metadata documents to trigger snapshot listeners
+        // 1. UPDATE METADATA (Triggers real-time listeners on other devices without burning quota)
         const metaBatch = db.batch();
         const metaData = { updatedAt: timestamp, updatedBy: userEmail };
         metaBatch.set(db.collection("feedme_module").doc("metadata"), metaData);
@@ -169,61 +196,9 @@ window.syncStateToFirestore = async function() {
         metaBatch.set(db.collection("inventory_module").doc("metadata"), metaData);
         await metaBatch.commit();
 
-        // 2. Full-Replace Sync: Delete stale docs then write fresh data
-        // This ensures Firebase is always an exact mirror of local state
-
-        // FeedMe — Full Replace
-        const feedmeListRef = db.collection("feedme_module").doc("data").collection("list");
-        const existingFeedme = await feedmeListRef.get();
-        const localFeedmeIds = new Set((window.AppState.customers || []).map(c => c.id));
-        // Delete docs that no longer exist locally
-        const feedmeDeleteBatch = db.batch();
-        let feedmeDeleteCount = 0;
-        existingFeedme.forEach(doc => {
-            if (!localFeedmeIds.has(doc.id)) {
-                feedmeDeleteBatch.delete(doc.ref);
-                feedmeDeleteCount++;
-            }
-        });
-        if (feedmeDeleteCount > 0) await feedmeDeleteBatch.commit();
-        // Write/update all current customers
-        if (window.AppState.customers && window.AppState.customers.length > 0) {
-            await performChunkedBatch(feedmeListRef, window.AppState.customers);
-        }
-
-        // Dong Zhuo
-        const dzListRef = db.collection("dong_zhuo_module").doc("data").collection("list");
-        const existingDz = await dzListRef.get();
-        const localDzIds = new Set((window.AppState.dongZhuoCustomers || []).map(c => c.id));
-        const dzDeleteBatch = db.batch();
-        let dzDeleteCount = 0;
-        existingDz.forEach(doc => {
-            if (!localDzIds.has(doc.id)) {
-                dzDeleteBatch.delete(doc.ref);
-                dzDeleteCount++;
-            }
-        });
-        if (dzDeleteCount > 0) await dzDeleteBatch.commit();
-        if (window.AppState.dongZhuoCustomers && window.AppState.dongZhuoCustomers.length > 0) {
-            await performChunkedBatch(dzListRef, window.AppState.dongZhuoCustomers);
-        }
-
-        // Inventory
-        await performChunkedBatch(db.collection("inventory_module").doc("data").collection("items"), window.AppState.inventory);
-
-        // Hub Activities (Activity Log)
-        if (window.AppState.hubActivities && window.AppState.hubActivities.length > 0) {
-            await performChunkedBatch(db.collection("inventory_module").doc("data").collection("hub_activities"), window.AppState.hubActivities);
-        }
-
-        // Inventory Logs (Hub In/Out)
-        if (window.AppState.inventoryLogs && window.AppState.inventoryLogs.length > 0) {
-            await performChunkedBatch(db.collection("inventory_module").doc("data").collection("inventory_logs"), window.AppState.inventoryLogs);
-        }
-
-        console.log("☁️ Module subcollections synced (Full-Replace Strategy) — FeedMe:", (window.AppState.customers || []).length, "records");
+        if (!silent) console.log("⚡ Cloud Sync Listeners Triggered (Delta Mode)");
     } catch (e) {
-        console.error("Sync Error:", e);
+        console.error("Metadata Sync Error:", e);
     } finally {
         window.AppState.isCloudSyncing = false;
     }
@@ -244,24 +219,45 @@ window.loadStateFromFirestore = async function() {
             db.collection("schedules_v2").get()
         ]);
 
-        if (!feedmeSnap.empty) {
-            window.AppState.customers = feedmeSnap.docs.map(doc => doc.data());
-        }
-        if (!dongZhuoSnap.empty) {
-            window.AppState.dongZhuoCustomers = dongZhuoSnap.docs.map(doc => doc.data());
-        }
-        if (!inventorySnap.empty) {
+        window.AppState.customers = feedmeSnap.empty ? [] : feedmeSnap.docs.map(doc => doc.data());
+        window.AppState.dongZhuoCustomers = dongZhuoSnap.empty ? [] : dongZhuoSnap.docs.map(doc => doc.data());
+        if (inventorySnap.empty) {
+            if (!window.AppState.inventory || window.AppState.inventory.length === 0) {
+                const hardwareItems = (window.AppState.products || []).filter(p => p.type === 'Hardware');
+                window.AppState.inventory = [];
+                hardwareItems.forEach(h => {
+                    ['Hugo', 'YS', 'Tai'].forEach(area => {
+                        window.AppState.inventory.push({ productId: h.id, outlet: 'Penang', area: area, quantity: 0 });
+                    });
+                    ['KT', 'JQ'].forEach(area => {
+                        window.AppState.inventory.push({ productId: h.id, outlet: 'Ipoh', area: area, quantity: 0 });
+                    });
+                });
+            } else {
+                // Cloud is empty but local has data (sync was interrupted). Preserve local and queue resync.
+                setTimeout(() => { if (window.saveStateToCloud) window.saveStateToCloud(); }, 2000);
+            }
+        } else {
             window.AppState.inventory = inventorySnap.docs.map(doc => doc.data());
         }
-        if (!hubActSnap.empty) {
-            window.AppState.hubActivities = hubActSnap.docs.map(doc => doc.data());
-        }
-        if (invLogSnap && !invLogSnap.empty) {
-            window.AppState.inventoryLogs = invLogSnap.docs.map(doc => doc.data());
+
+        if (hubActSnap.empty && window.AppState.hubActivities && window.AppState.hubActivities.length > 0) {
+            // Preserve local data if cloud sync was interrupted
+            setTimeout(() => { if (window.saveStateToCloud) window.saveStateToCloud(); }, 2000);
+        } else {
+            window.AppState.hubActivities = hubActSnap.empty ? [] : hubActSnap.docs.map(doc => doc.data());
         }
 
-        if (!invSnap.empty) {
-            window.AppState.invoices = invSnap.docs.map(doc => doc.data());
+        if ((!invLogSnap || invLogSnap.empty) && window.AppState.inventoryLogs && window.AppState.inventoryLogs.length > 0) {
+            setTimeout(() => { if (window.saveStateToCloud) window.saveStateToCloud(); }, 2000);
+        } else {
+            window.AppState.inventoryLogs = !invLogSnap || invLogSnap.empty ? [] : invLogSnap.docs.map(doc => doc.data());
+        }
+
+        window.AppState.invoices = invSnap.empty ? [] : invSnap.docs.map(doc => doc.data());
+        if (window.incInventoryVersion) window.incInventoryVersion();
+        if (window.Pages && window.Pages.inventory && window.Pages.inventory._invalidateCache) {
+            window.Pages.inventory._invalidateCache();
         }
 
         window.AppState.schedules = schedSnap.empty ? [] : schedSnap.docs.map(doc => doc.data());
@@ -279,7 +275,9 @@ window.saveInvoiceToFirestore = async function(invoice) {
         await db.collection("invoices_v2").doc(invoice.id).set(invoice);
         console.log("☁️ Invoice " + invoice.id + " saved to dedicated collection");
         // Also update global state timestamp to notify other users
-        await window.syncStateToFirestore();
+        if (window.syncStateToFirestore) {
+            window.syncStateToFirestore().catch(e => console.warn("Background module sync failed:", e));
+        }
     } catch (e) {
         console.error("Invoice Save Error:", e);
     }
@@ -291,7 +289,9 @@ window.deleteInvoiceFromFirestore = async function(invoiceId) {
         var db = window.firebaseDb;
         await db.collection("invoices_v2").doc(invoiceId).delete();
         console.log("☁️ Invoice " + invoiceId + " deleted from cloud");
-        await window.syncStateToFirestore();
+        if (window.syncStateToFirestore) {
+            window.syncStateToFirestore().catch(e => console.warn("Background module sync failed:", e));
+        }
     } catch (e) {
         console.error("Invoice Delete Error:", e);
     }
@@ -300,6 +300,11 @@ window.deleteInvoiceFromFirestore = async function(invoiceId) {
 window.resetFirestoreModules = async function(modules) {
     if (!window.AppState.user) return;
     try {
+        modules = modules || [];
+        if (modules.includes('invoices') && !modules.includes('inventory')) {
+            modules = modules.concat('inventory');
+        }
+
         var db = window.firebaseDb;
         const timestamp = new Date().toISOString();
         const userEmail = (window.AppState.user.email || 'system').toLowerCase();
@@ -366,7 +371,9 @@ window.saveScheduleToFirestore = async function(schedule) {
         var db = window.firebaseDb;
         await db.collection("schedules_v2").doc(schedule.id).set(schedule);
         console.log("☁️ Schedule " + schedule.id + " saved to dedicated collection");
-        await window.syncStateToFirestore();
+        if (window.syncStateToFirestore) {
+            window.syncStateToFirestore().catch(e => console.warn("Background module sync failed:", e));
+        }
     } catch (e) {
         console.error("Schedule Save Error:", e);
     }
@@ -378,7 +385,9 @@ window.deleteScheduleFromFirestore = async function(scheduleId) {
         var db = window.firebaseDb;
         await db.collection("schedules_v2").doc(scheduleId).delete();
         console.log("☁️ Schedule " + scheduleId + " deleted from cloud");
-        await window.syncStateToFirestore();
+        if (window.syncStateToFirestore) {
+            window.syncStateToFirestore().catch(e => console.warn("Background module sync failed:", e));
+        }
     } catch (e) {
         console.error("Schedule Delete Error:", e);
     }
@@ -454,9 +463,18 @@ window.firebaseAuth.onAuthStateChanged(async function(user) {
         await window.loadStateFromFirestore();
         
         // Safety: If no access token exists locally, the account cannot be "linked" on this device yet
-        if (!localStorage.getItem('google_access_token')) {
+        const userCalendarToken = window.getGoogleCalendarToken(user);
+        if (userCalendarToken) {
+            window.AppState.isGoogleLinked = true;
+            if (window.gapi?.client?.setToken) {
+                window.gapi.client.setToken({ access_token: userCalendarToken });
+            }
+        } else {
             window.AppState.isGoogleLinked = false;
             window.saveState();
+            if (window.gapi?.client?.setToken) {
+                window.gapi.client.setToken(null);
+            }
         }
 
         if (window.currentView === 'login') {
@@ -542,6 +560,7 @@ var NAV_ITEMS = [
   { id: 'dong_zhuo', label: '老总', iconGif: 'assets/icafe.gif', iconSvg: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 21a8 8 0 0 1 13.292-6"/><circle cx="10" cy="8" r="5"/><path d="m19 19-4-4v-3"/></svg>', roles: ['SuperAdmin', 'Sales'] },
   { id: 'agents', label: 'Sales Force', iconGif: 'assets/NexMinion.gif', iconSvg: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>', roles: ['SuperAdmin', 'Sales', 'Tech', 'Marketing'] },
   { id: 'catalog', label: 'Listing', iconGif: 'assets/ProductServices.gif', iconSvg: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><circle cx="14" cy="13" r="3"/><path d="m16.12 15.12 2.83 2.83"/></svg>', roles: ['SuperAdmin', 'Sales', 'Marketing'] },
+  { id: 'stocks_list', label: 'Stocks List', iconGif: 'assets/ProductServices.gif', iconSvg: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>', roles: ['SuperAdmin', 'Sales', 'Marketing'] },
   { id: 'user_log', label: 'HRM', iconGif: 'assets/NexAI Fans.gif', iconSvg: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>', roles: ['SuperAdmin'] }
 ];
 

@@ -70,8 +70,53 @@ window._whFinal = function() {
   }
   p.successMessage = (total > 0) ? 'Action recorded successfully.' : 'No changes detected.';
   p.showSuccessOverlay = true; p.triggerUpdate(true);
-  setTimeout(function() {
-    if (window.saveState) window.saveState();
+  
+  setTimeout(async function() {
+    // --- ⚡ ULTRA FAST DELTA SYNC TO FIRESTORE ---
+    if (total > 0 && window.firebaseDb) {
+        try {
+            const db = window.firebaseDb;
+            const batch = db.batch();
+            
+            // 1. Update the specific inventory items that were changed
+            const changedProducts = Object.keys(p.isStockInSummaryOpen ? p.stockInDraft : (p.isStockOutSummaryOpen ? p.stockOutDraft : p.transferDraft));
+            
+            if (p.isTransferSummaryOpen) {
+                // Update BOTH areas for transfers
+                changedProducts.forEach(pid => {
+                    const fromInv = state.inventory.find(i => i.productId === pid && i.area === p.transferFromArea);
+                    const toInv = state.inventory.find(i => i.productId === pid && i.area === p.transferToArea);
+                    if (fromInv) batch.set(db.collection("inventory_module").doc("data").collection("items").doc(fromInv.productId + '_' + fromInv.area), fromInv);
+                    if (toInv) batch.set(db.collection("inventory_module").doc("data").collection("items").doc(toInv.productId + '_' + toInv.area), toInv);
+                });
+            } else {
+                // Update specific areas for stock in/out
+                const draftObj = p.isStockInSummaryOpen ? p.stockInDraft : p.stockOutDraft;
+                for (let ar in draftObj) {
+                    for (let pid in draftObj[ar]) {
+                        if (draftObj[ar][pid] > 0) {
+                            const inv = state.inventory.find(i => i.productId === pid && i.area === ar);
+                            if (inv) batch.set(db.collection("inventory_module").doc("data").collection("items").doc(inv.productId + '_' + inv.area), inv);
+                        }
+                    }
+                }
+            }
+            
+            // 2. Write the new activity log
+            const latestAct = state.hubActivities[state.hubActivities.length - 1];
+            if (latestAct && latestAct.items && latestAct.items.length > 0) {
+                batch.set(db.collection("inventory_module").doc("data").collection("hub_activities").doc(latestAct.id), latestAct);
+            }
+            
+            await batch.commit();
+            console.log("⚡ Delta Sync complete for Warehouse Operation");
+        } catch (e) {
+            console.error("Warehouse Delta Sync Error:", e);
+        }
+    }
+
+    if (window.saveState) window.saveState(); // Fallback for localStorage only, doesn't mass-sync anymore
+
     p.showSuccessOverlay = false;
     p.isStockInModalOpen = false; p.isStockOutModalOpen = false; p.isTransferModalOpen = false;
     p.isStockInSummaryOpen = false; p.isStockOutSummaryOpen = false; p.isTransferSummaryOpen = false;
@@ -141,7 +186,8 @@ window.Pages.inventory = {
   renderBackground: function() {
     const state = window.AppState;
     const hardware = this._getHardwareProducts();
-    const currentKey = `${this.filterArea}|${this.searchQuery}|${state.inventory.length}|${state.inventoryVersion || 0}`;
+    const inventorySignature = (state.inventory || []).map(inv => `${inv.productId}:${inv.area}:${inv.quantity}`).join('|');
+    const currentKey = `${this.filterArea}|${this.searchQuery}|${state.inventory.length}|${state.inventoryVersion || 0}|${inventorySignature}`;
     
     let styleBlock = `<style>
       #modal-portal input::-webkit-outer-spin-button, #modal-portal input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }

@@ -18,6 +18,7 @@ window.Pages.schedule = {
   gapiInited: false,
   gsiInited: false,
   googleEvents: [],
+  isBulkSyncing: false,
   modalDraft: {
       client: '',
       date: '',
@@ -40,6 +41,39 @@ window.Pages.schedule = {
       const m = (date.getMonth() + 1).toString().padStart(2, '0');
       const d = date.getDate().toString().padStart(2, '0');
       return `${y}-${m}-${d}`;
+  },
+
+  withTimeout: function(promise, ms, label) {
+      let timeoutId;
+      const timeout = new Promise((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error(label + ' timed out')), ms);
+      });
+      return Promise.race([
+          Promise.resolve(promise).finally(() => clearTimeout(timeoutId)),
+          timeout
+      ]);
+  },
+
+  getCurrentUserCalendarKey: function() {
+      const user = window.AppState.user || window.firebaseAuth?.currentUser || {};
+      return user.id || user.uid || user.email || 'anonymous';
+  },
+
+  getScheduleGoogleEventId: function(schedule) {
+      if (!schedule) return null;
+      const key = this.getCurrentUserCalendarKey();
+      if (schedule.googleEventIds && schedule.googleEventIds[key]) return schedule.googleEventIds[key];
+      if (schedule.googleOwnerKey === key && schedule.googleEventId) return schedule.googleEventId;
+      return null;
+  },
+
+  setScheduleGoogleEventId: function(schedule, eventId) {
+      if (!schedule || !eventId) return schedule;
+      const key = this.getCurrentUserCalendarKey();
+      schedule.googleEventIds = { ...(schedule.googleEventIds || {}), [key]: eventId };
+      schedule.googleOwnerKey = key;
+      schedule.googleEventId = eventId;
+      return schedule;
   },
 
   init: function() {
@@ -131,8 +165,13 @@ window.Pages.schedule = {
   },
 
   handleAuthClick: function() {
-    // If we are already logged in via Firebase, we can try to use that token
-    const firebaseToken = localStorage.getItem('google_access_token');
+    if (!window.AppState.user) {
+        alert('Please log in before linking Google Calendar.');
+        return;
+    }
+
+    // Use only the Google Calendar token for the current Firebase user.
+    const firebaseToken = window.getGoogleCalendarToken ? window.getGoogleCalendarToken() : null;
     
     if (firebaseToken) {
         gapi.client.setToken({ access_token: firebaseToken });
@@ -140,6 +179,9 @@ window.Pages.schedule = {
         this.fetchEvents();
         this.syncLocalTasksToGoogle();
         this.triggerUpdate();
+        if (!this.isBulkSyncing) {
+            this.syncLocalTasksToGoogle().catch(err => console.warn('Auto sync portal tasks to Google failed:', err));
+        }
         return;
     }
 
@@ -154,7 +196,9 @@ window.Pages.schedule = {
             console.error('Auth Error:', resp);
             return;
         }
-        localStorage.setItem('google_access_token', resp.access_token);
+        if (window.setGoogleCalendarToken) {
+            window.setGoogleCalendarToken(resp.access_token);
+        }
         window.AppState.isGoogleLinked = true;
         window.saveState();
         await self.fetchEvents();
@@ -162,24 +206,26 @@ window.Pages.schedule = {
         self.triggerUpdate();
     };
 
-    this.tokenClient.requestAccessToken({prompt: 'consent'});
+    this.tokenClient.requestAccessToken({
+        prompt: 'consent',
+        hint: window.AppState.user.email || ''
+    });
   },
 
   fetchEvents: async function() {
     if (!window.AppState.isGoogleLinked || !this.gapiInited) return;
     
-    // Ensure token is set in gapi client
-    if (!gapi.client.getToken()) {
-        const token = localStorage.getItem('google_access_token');
-        if (token) {
-            gapi.client.setToken({ access_token: token });
-        } else {
-            console.warn('Sync enabled but no token found. Resetting link status.');
-            window.AppState.isGoogleLinked = false;
-            window.saveState();
-            this.triggerUpdate();
-            return;
-        }
+    // Always apply the current Firebase user's token to avoid syncing with a previous user's Google account.
+    const token = window.getGoogleCalendarToken ? window.getGoogleCalendarToken() : null;
+    if (token) {
+        gapi.client.setToken({ access_token: token });
+    } else {
+        console.warn('Sync enabled but no token found. Resetting link status.');
+        if (gapi.client.setToken) gapi.client.setToken(null);
+        window.AppState.isGoogleLinked = false;
+        window.saveState();
+        this.triggerUpdate();
+        return;
     }
     
     try {
@@ -219,16 +265,17 @@ window.Pages.schedule = {
         const maxTime = new Date(timeMax).getTime();
 
         window.AppState.schedules = localSchedules.filter(sch => {
-            if (!sch.googleEventId) return true; // Keep local-only tasks
+            const eventIdForThisUser = this.getScheduleGoogleEventId(sch);
+            if (!eventIdForThisUser) return true; // Keep portal tasks that are not linked to this user's calendar.
             
             const schDate = window.Pages.schedule.parseDate(sch.date).getTime();
             // If the task is outside our fetch range, we can't be sure if it's deleted, so keep it.
             if (schDate < minTime || schDate > maxTime) return true;
             
             // If it's in range but the ID is missing from Google, it was likely deleted.
-            const exists = remoteIds.includes(sch.googleEventId);
+            const exists = remoteIds.includes(eventIdForThisUser);
             if (!exists) console.log(`🗑️ Auto-cleaning task deleted from mobile: ${sch.client}`);
-            return exists;
+            return true;
         });
 
         if (window.AppState.schedules.length !== initialCount) {
@@ -239,7 +286,8 @@ window.Pages.schedule = {
     } catch (err) {
         console.warn('Sync failed (likely expired token), attempting silent re-auth...');
         if (err.status === 401) {
-            localStorage.removeItem('google_access_token');
+            if (window.clearGoogleCalendarToken) window.clearGoogleCalendarToken();
+            if (gapi.client.setToken) gapi.client.setToken(null);
             window.AppState.isGoogleLinked = false;
             window.saveState();
             this.triggerUpdate();
@@ -294,7 +342,8 @@ window.Pages.schedule = {
     } catch (err) {
         console.error('❌ Failed to push to Google:', err);
         if (err.status === 401) {
-            localStorage.removeItem('google_access_token');
+            if (window.clearGoogleCalendarToken) window.clearGoogleCalendarToken();
+            if (gapi.client.setToken) gapi.client.setToken(null);
             window.AppState.isGoogleLinked = false;
             window.saveState();
             this.triggerUpdate();
@@ -305,9 +354,10 @@ window.Pages.schedule = {
 
   syncLocalTasksToGoogle: async function() {
     if (!window.AppState.isGoogleLinked || !this.gapiInited) return;
+    if (this.isBulkSyncing) return;
     
     console.log('📦 Starting Retroactive Bulk Sync...');
-    const unsynced = (window.AppState.schedules || []).filter(s => !s.googleEventId);
+    const unsynced = (window.AppState.schedules || []).filter(s => !this.getScheduleGoogleEventId(s));
     
     if (unsynced.length === 0) {
         console.log('✅ No unsynced tasks found.');
@@ -315,16 +365,24 @@ window.Pages.schedule = {
     }
 
     let syncCount = 0;
-    for (const sch of unsynced) {
-        const eventId = await this.createGoogleEvent(sch);
-        if (eventId) {
-            // Mark as synced with the unique digital fingerprint
-            const idx = window.AppState.schedules.findIndex(s => s.id === sch.id);
-            if (idx !== -1) {
-                window.AppState.schedules[idx].googleEventId = eventId;
-                syncCount++;
+    this.isBulkSyncing = true;
+    try {
+        for (const sch of unsynced) {
+            const eventId = await this.withTimeout(this.createGoogleEvent(sch), 18000, 'Google Calendar create');
+            if (eventId) {
+                // Mark as synced with the unique digital fingerprint for this Firebase user.
+                const idx = window.AppState.schedules.findIndex(s => s.id === sch.id);
+                if (idx !== -1) {
+                    this.setScheduleGoogleEventId(window.AppState.schedules[idx], eventId);
+                    if (window.saveScheduleToFirestore) {
+                        await this.withTimeout(window.saveScheduleToFirestore(window.AppState.schedules[idx]), 10000, 'Firebase schedule save');
+                    }
+                    syncCount++;
+                }
             }
         }
+    } finally {
+        this.isBulkSyncing = false;
     }
 
     if (syncCount > 0) {
@@ -348,14 +406,29 @@ window.Pages.schedule = {
     };
 
     try {
-        await gapi.client.calendar.events.patch({
+        await Promise.race([
+          gapi.client.calendar.events.patch({
             'calendarId': 'primary',
             'eventId': eventId,
             'resource': eventPatch
-        });
-        await this.fetchEvents();
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Google Calendar update timed out')), 15000))
+        ]);
+        const googleIdx = this.googleEvents.findIndex(e => e.id === eventId);
+        if (googleIdx !== -1) {
+            this.googleEvents[googleIdx] = {
+                ...this.googleEvents[googleIdx],
+                summary: eventPatch.summary,
+                description: eventPatch.description,
+                start: eventPatch.start,
+                end: eventPatch.end,
+                colorId: eventPatch.colorId
+            };
+        }
+        this.fetchEvents().catch(err => console.warn('Post-update calendar refresh failed:', err));
     } catch (err) {
         console.error('Error updating event:', err);
+        throw err;
     }
   },
 
@@ -629,7 +702,7 @@ window.Pages.schedule = {
     local.forEach(s => s.isShared = true);
 
     // Google - hide if already assigned/claimed OR if name/date match (Safety Net)
-    const assignedGoogleIds = localSchedules.filter(s => s.googleEventId).map(s => s.googleEventId);
+    const assignedGoogleIds = localSchedules.map(s => this.getScheduleGoogleEventId(s)).filter(Boolean);
     const localTitles = local.map(s => (s.client || '').toLowerCase());
     
     const google = this.googleEvents.filter(e => {
@@ -677,7 +750,7 @@ window.Pages.schedule = {
 
     if (typeOrSource === 'Google') {
         const localSchedules = window.AppState.schedules || [];
-        const assignedGoogleIds = localSchedules.filter(s => s.googleEventId).map(s => s.googleEventId);
+        const assignedGoogleIds = localSchedules.map(s => this.getScheduleGoogleEventId(s)).filter(Boolean);
         
         // Get local titles for this specific date to fuzzy match
         const localTitlesToday = localSchedules.filter(s => {
@@ -967,8 +1040,9 @@ window.Pages.schedule = {
       
       if (source === 'local') {
           const sch = window.AppState.schedules.find(s => s.id === id);
-          if (sch && sch.googleEventId && window.AppState.isGoogleLinked) {
-              await this.deleteGoogleEvent(sch.googleEventId);
+          const googleEventId = this.getScheduleGoogleEventId(sch);
+          if (sch && googleEventId && window.AppState.isGoogleLinked) {
+              await this.deleteGoogleEvent(googleEventId);
           }
           window.AppState.schedules = window.AppState.schedules.filter(s => s.id !== id);
           if (window.deleteScheduleFromFirestore) window.deleteScheduleFromFirestore(id);
@@ -1040,10 +1114,19 @@ window.Pages.schedule = {
                           status,
                           colorId: this.selectedColorId 
                       };
-                      if (window.saveScheduleToFirestore) await window.saveScheduleToFirestore(window.AppState.schedules[idx]);
+                      if (window.saveScheduleToFirestore) {
+                          await this.withTimeout(window.saveScheduleToFirestore(window.AppState.schedules[idx]), 10000, 'Firebase schedule save');
+                      }
                       window.saveState();
-                      if (window.AppState.schedules[idx].googleEventId && window.AppState.isGoogleLinked) {
-                          await this.updateGoogleEvent(window.AppState.schedules[idx].googleEventId, window.AppState.schedules[idx]);
+                      const googleEventId = this.getScheduleGoogleEventId(window.AppState.schedules[idx]);
+                      if (googleEventId && window.AppState.isGoogleLinked) {
+                          await this.withTimeout(this.updateGoogleEvent(googleEventId, window.AppState.schedules[idx]), 18000, 'Google Calendar update');
+                      } else if (window.AppState.isGoogleLinked) {
+                          const newGoogleId = await this.withTimeout(this.createGoogleEvent(window.AppState.schedules[idx]), 18000, 'Google Calendar create');
+                          this.setScheduleGoogleEventId(window.AppState.schedules[idx], newGoogleId);
+                          if (window.saveScheduleToFirestore) {
+                              await this.withTimeout(window.saveScheduleToFirestore(window.AppState.schedules[idx]), 10000, 'Firebase schedule save');
+                          }
                       }
                   }
               } else {
@@ -1051,7 +1134,6 @@ window.Pages.schedule = {
                   const assignor = gItem && gItem.creator ? (gItem.creator.displayName || gItem.creator.email) : 'Google User';
                   const newSch = {
                     id: 'sch-' + Date.now(),
-                    googleEventId: id,
                     client, date, time,
                     type: this.selectedType,
                     assignee: agent,
@@ -1060,10 +1142,23 @@ window.Pages.schedule = {
                     colorId: this.selectedColorId
                   };
                   if (!window.AppState.schedules) window.AppState.schedules = [];
-                  window.AppState.schedules.push(newSch);
-                  if (window.saveScheduleToFirestore) await window.saveScheduleToFirestore(newSch);
+                  const existingIdx = window.AppState.schedules.findIndex(s => this.getScheduleGoogleEventId(s) === id);
+                  let syncedSch = newSch;
+                  if (existingIdx !== -1) {
+                      syncedSch = {
+                          ...window.AppState.schedules[existingIdx],
+                          ...newSch,
+                          id: window.AppState.schedules[existingIdx].id
+                      };
+                      window.AppState.schedules[existingIdx] = syncedSch;
+                  } else {
+                      window.AppState.schedules.push(newSch);
+                  }
+                  this.setScheduleGoogleEventId(syncedSch, id);
+                  if (window.saveScheduleToFirestore) {
+                      await this.withTimeout(window.saveScheduleToFirestore(syncedSch), 10000, 'Firebase schedule save');
+                  }
                   window.saveState();
-                  if (window.AppState.isGoogleLinked) await this.updateGoogleEvent(id, newSch);
               }
           } else {
               const newSch = {
@@ -1078,12 +1173,14 @@ window.Pages.schedule = {
               if (!window.AppState.schedules) window.AppState.schedules = [];
               window.AppState.schedules.push(newSch);
               if (window.AppState.isGoogleLinked) {
-                  const gId = await this.createGoogleEvent(newSch);
+                  const gId = await this.withTimeout(this.createGoogleEvent(newSch), 18000, 'Google Calendar create');
                   if (gId) {
-                      newSch.googleEventId = gId;
+                      this.setScheduleGoogleEventId(newSch, gId);
                   }
               }
-              if (window.saveScheduleToFirestore) await window.saveScheduleToFirestore(newSch);
+              if (window.saveScheduleToFirestore) {
+                  await this.withTimeout(window.saveScheduleToFirestore(newSch), 10000, 'Firebase schedule save');
+              }
               window.saveState();
           }
       } catch (err) {

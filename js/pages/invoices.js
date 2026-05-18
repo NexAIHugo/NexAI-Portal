@@ -84,6 +84,19 @@ window.Pages.invoices = {
       `;
     }
 
+    if (this.isDeleting) {
+      return `
+        <div class="recording-overlay">
+          <div class="recording-card">
+             <div class="spinner-orange"></div>
+             <h2 style="font-size: 2rem; margin-bottom: 10px;">Removing Record...</h2>
+             <p style="color: rgba(255,255,255,0.7);">Syncing changes securely to the cloud.</p>
+          </div>
+        </div>
+        ${this.renderMainView()}
+      `;
+    }
+
     if (this.isProcessing) return this.renderLoading();
     if (this.previewData) return this.renderVerification(this.previewData);
 
@@ -738,12 +751,16 @@ window.Pages.invoices = {
     } catch(err) { console.error("afterRender failed:", err); }
   },
 
-  deleteInvoice: function(id) {
+  deleteInvoice: async function(id) {
     const inv = window.AppState.invoices.find(i => i.id === id);
     if (!inv) return;
 
+    this.isDeleting = true;
+    this.triggerUpdate();
+
     // 1. REVERSE STOCK DEDUCTIONS
     const activityItems = [];
+    const inventoryUpdates = [];
     (inv.items || []).forEach(it => {
       const prod = window.AppState.products.find(p => p.id === it.productId);
       if (prod && prod.type === 'Hardware') {
@@ -751,6 +768,7 @@ window.Pages.invoices = {
           const invObj = window.AppState.inventory.find(inv => inv.productId === it.productId && inv.area === it.area);
           if (invObj) {
             invObj.quantity = (invObj.quantity || 0) + it.qty;
+            inventoryUpdates.push(invObj);
           }
         }
         activityItems.push({ productId: it.productId, name: prod.name, qty: it.qty, area: it.area });
@@ -758,9 +776,10 @@ window.Pages.invoices = {
     });
 
     // 2. LOG THE DELETION REVERSAL
+    let newAct = null;
     if (activityItems.length > 0) {
       if (!window.AppState.hubActivities) window.AppState.hubActivities = [];
-      window.AppState.hubActivities.push({
+      newAct = {
         id: 'act-' + Date.now(),
         type: 'delete',
         source: 'Invoice Removal (Inv# ' + id + ')',
@@ -769,20 +788,54 @@ window.Pages.invoices = {
         agent: 'Agent 1',
         items: activityItems,
         createdBy: window.AppState.user.displayName
-      });
+      };
+      window.AppState.hubActivities.push(newAct);
     }
 
-    // 3. CLEANUP DATA
-    if (inv.fileUrl) URL.revokeObjectURL(inv.fileUrl);
-    if (window.PDFStorage) {
-      window.PDFStorage.deletePDF(id);
-      window.PDFStorage.deleteFromCloud(id);
+    try {
+        // 3. CLEANUP DATA
+        if (inv.fileUrl) URL.revokeObjectURL(inv.fileUrl);
+        if (window.PDFStorage) {
+          window.PDFStorage.deletePDF(id).catch(e=>{});
+          window.PDFStorage.deleteFromCloud(id).catch(e=>{});
+        }
+        window.AppState.invoices = window.AppState.invoices.filter(inv => inv.id !== id);
+        
+        // --- ⚡ ULTRA FAST DELTA SYNC TO FIRESTORE ---
+        if (window.firebaseDb) {
+            const db = window.firebaseDb;
+            const batch = db.batch();
+            
+            // Delete the invoice document
+            batch.delete(db.collection("invoices_v2").doc(id));
+            
+            // Update the specific inventory items that changed
+            inventoryUpdates.forEach(invObj => {
+                if (invObj.productId && invObj.area) {
+                    batch.set(db.collection("inventory_module").doc("data").collection("items").doc(invObj.productId + '_' + invObj.area), invObj);
+                }
+            });
+            
+            // Add the new activity log
+            if (newAct) {
+                batch.set(db.collection("inventory_module").doc("data").collection("hub_activities").doc(newAct.id), newAct);
+            }
+            
+            // Commit the batch fast!
+            await batch.commit();
+            console.log("⚡ Delta Sync complete for deleted invoice:", id);
+        }
+        
+        window.AppState.deletedInvoicesCount = (window.AppState.deletedInvoicesCount || 0) + 1;
+        if (window.incInventoryVersion) window.incInventoryVersion();
+        
+        if (window.saveState) window.saveState();
+    } catch (e) {
+        console.error("Delta Delete Error:", e);
+        alert("Failed to securely delete from cloud. Check your connection.");
     }
-    window.AppState.invoices = window.AppState.invoices.filter(inv => inv.id !== id);
-    if (window.deleteInvoiceFromFirestore) window.deleteInvoiceFromFirestore(id);
-    window.AppState.deletedInvoicesCount = (window.AppState.deletedInvoicesCount || 0) + 1;
-    if (window.incInventoryVersion) window.incInventoryVersion();
-    if (window.saveState) window.saveState();
+    
+    this.isDeleting = false;
     this.triggerUpdate();
   },
 
@@ -815,6 +868,29 @@ window.Pages.invoices = {
     item.area = newArea;
     if (window.incInventoryVersion) window.incInventoryVersion();
     this.openEditAreaIdx = null;
+    
+    // --- ⚡ ULTRA FAST DELTA SYNC TO FIRESTORE ---
+    if (window.firebaseDb) {
+        const db = window.firebaseDb;
+        const batch = db.batch();
+        
+        // Save the modified invoice
+        batch.set(db.collection("invoices_v2").doc(inv.id), inv);
+        
+        // Save the old inventory item (restored)
+        if (oldArea) {
+            const oldInv = state.inventory.find(i => i.productId === item.productId && i.area === oldArea);
+            if (oldInv) batch.set(db.collection("inventory_module").doc("data").collection("items").doc(oldInv.productId + '_' + oldInv.area), oldInv);
+        }
+        
+        // Save the new inventory item (deducted)
+        if (newInv) {
+            batch.set(db.collection("inventory_module").doc("data").collection("items").doc(newInv.productId + '_' + newInv.area), newInv);
+        }
+        
+        batch.commit().catch(e => console.error("Invoice Area Delta Sync Error:", e));
+    }
+
     this.triggerUpdate();
   },
 
@@ -953,7 +1029,12 @@ window.Pages.invoices = {
       
       let matchedProduct = null;
       for (const p of products) {
-        if (matchLine.includes(p.matchName)) {
+        const skuMatchName = p.sku && p.sku !== '-' ? p.sku.toUpperCase().replace(/[^A-Z0-9\s]/g, ' ').replace(/\\s+/g, ' ') : null;
+        
+        // Match exact name OR exact SKU OR first 20 characters of a long name
+        if (matchLine.includes(p.matchName) || 
+           (skuMatchName && matchLine.includes(skuMatchName)) || 
+           (p.matchName.length > 20 && matchLine.includes(p.matchName.substring(0, 20)))) {
           matchedProduct = p;
           break;
         }
@@ -1092,8 +1173,8 @@ window.Pages.invoices = {
           createdBy: window.AppState.user.displayName
         };
         state.invoices.push(newInv);
-        if (window.saveInvoiceToFirestore) window.saveInvoiceToFirestore(newInv);
         
+        let newAct = null;
         // Log the activity for Hub Activity module
         if (!state.hubActivities) state.hubActivities = [];
         const activityItems = finalItems.filter(it => {
@@ -1105,7 +1186,7 @@ window.Pages.invoices = {
         });
         if (activityItems.length > 0) {
           const hardwareAreas = [...new Set(activityItems.map(it => it.area).filter(Boolean))];
-          state.hubActivities.push({
+          newAct = {
             id: 'act-' + Date.now(),
             type: 'out',
             source: 'NexInvoice Upload (Inv# ' + d.invoiceNo + ')',
@@ -1114,11 +1195,45 @@ window.Pages.invoices = {
             agent: d.salesAgent || 'Agent 1',
             items: activityItems,
             createdBy: window.AppState.user.displayName
-          });
+          };
+          state.hubActivities.push(newAct);
         }
+
+          // --- ⚡ ULTRA FAST DELTA SYNC TO FIRESTORE ---
+          if (window.firebaseDb) {
+              const db = window.firebaseDb;
+              const batch = db.batch();
+              
+              // 1. Add the new invoice document
+              batch.set(db.collection("invoices_v2").doc(newInv.id), newInv);
+              
+              // 2. Update the specific inventory items that were modified
+              finalItems.forEach(it => {
+                  if (it.productId && it.area) {
+                      const p = state.products.find(pp => pp.id === it.productId);
+                      if (p && p.type === 'Hardware') {
+                          const invObj = state.inventory.find(inv => inv.productId === it.productId && inv.area === it.area);
+                          if (invObj) {
+                              batch.set(db.collection("inventory_module").doc("data").collection("items").doc(invObj.productId + '_' + invObj.area), invObj);
+                          }
+                      }
+                  }
+              });
+              
+              // 3. Add the new activity log
+              if (newAct) {
+                  batch.set(db.collection("inventory_module").doc("data").collection("hub_activities").doc(newAct.id), newAct);
+              }
+              
+              // Commit the batch fast!
+              await batch.commit();
+              console.log("⚡ Delta Sync complete for Uploaded Invoice:", newInv.id);
+          }
 
           // Force Warehouse refresh
           if (window.incInventoryVersion) window.incInventoryVersion();
+
+          // Removed the mass window.saveState() call!
 
           setTimeout(() => {
             this.isRecording = false;
