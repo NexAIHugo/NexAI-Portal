@@ -53,6 +53,16 @@ window.handleLogout = function() {
         window._profileMenuOpen = false;
         window.clearGoogleCalendarToken(currentUser);
         window.AppState.isGoogleLinked = false;
+        
+        // Reset all page initialization flags so they reload clean on next login
+        if (window.Pages) {
+            Object.keys(window.Pages).forEach(key => {
+                if (window.Pages[key]) {
+                    window.Pages[key]._inited = false;
+                }
+            });
+        }
+        
         window.saveState();
         renderApp();
     });
@@ -526,7 +536,12 @@ window.firebaseAuth.onAuthStateChanged(async function(user) {
             .onSnapshot(function(snap) {
                 if (!window.AppState.isCloudSyncing) {
                     window.loadStateFromFirestore().then(function() { 
-                        if (window.currentView === 'schedule') renderApp(); 
+                        if (window.currentView === 'schedule') {
+                            renderApp(); 
+                            if (window.Pages && window.Pages.schedule && window.Pages.schedule.fetchEvents && window.AppState.isGoogleLinked) {
+                                window.Pages.schedule.fetchEvents().catch(err => console.warn(err));
+                            }
+                        }
                     });
                 }
             });

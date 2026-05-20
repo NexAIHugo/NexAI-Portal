@@ -79,10 +79,9 @@ window._whFinal = function() {
             const batch = db.batch();
             
             // 1. Update the specific inventory items that were changed
-            const changedProducts = Object.keys(p.isStockInSummaryOpen ? p.stockInDraft : (p.isStockOutSummaryOpen ? p.stockOutDraft : p.transferDraft));
-            
             if (p.isTransferSummaryOpen) {
                 // Update BOTH areas for transfers
+                const changedProducts = Object.keys(p.transferDraft[p.transferFromArea] || {});
                 changedProducts.forEach(pid => {
                     const fromInv = state.inventory.find(i => i.productId === pid && i.area === p.transferFromArea);
                     const toInv = state.inventory.find(i => i.productId === pid && i.area === p.transferToArea);

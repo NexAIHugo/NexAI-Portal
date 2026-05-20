@@ -7,12 +7,17 @@ window.Pages.schedule = {
   selectedType: 'Project',
   selectedColorId: '6', // Tangerine (Default for Projects)
   editingItem: null, // { id: string, source: 'local' | 'google' }
+  isGoogleSyncing: false,
+  googleSyncSuccess: false,
+  filters: { project: true, sales: true },
+  projectsCalendarId: null,
+  salesCalendarId: null,
   
   // Google API Config
   CLIENT_ID: '804385826589-8pe5gv4srskvpjb8n3q7m5hbgech2ruk.apps.googleusercontent.com',
   API_KEY: 'AIzaSyA7SuM06KXJMhXdzuDEkCzdFBA_HhBGWYQ',
   DISCOVERY_DOC: 'https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest',
-  SCOPES: 'https://www.googleapis.com/auth/calendar.events email profile',
+  SCOPES: 'https://www.googleapis.com/auth/calendar email profile',
   
   tokenClient: null,
   gapiInited: false,
@@ -212,6 +217,43 @@ window.Pages.schedule = {
     });
   },
 
+  getOrCreateSecondaryCalendars: async function() {
+      if (this.projectsCalendarId && this.salesCalendarId) return true;
+      try {
+          if (!gapi.client.calendar) {
+              console.error("Calendar client not ready");
+              return false;
+          }
+          const listResp = await gapi.client.calendar.calendarList.list();
+          const list = listResp.result.items || [];
+          
+          let projectsCal = list.find(c => c.summary === "NexAI Projects");
+          let salesCal = list.find(c => c.summary === "NexAI Sales Demos");
+          
+          if (!projectsCal) {
+              console.log("Creating dedicated secondary calendar: NexAI Projects");
+              const newCal = await gapi.client.calendar.calendars.insert({
+                  resource: { summary: "NexAI Projects" }
+              });
+              projectsCal = newCal.result;
+          }
+          this.projectsCalendarId = projectsCal.id;
+          
+          if (!salesCal) {
+              console.log("Creating dedicated secondary calendar: NexAI Sales Demos");
+              const newCal = await gapi.client.calendar.calendars.insert({
+                  resource: { summary: "NexAI Sales Demos" }
+              });
+              salesCal = newCal.result;
+          }
+          this.salesCalendarId = salesCal.id;
+          return true;
+      } catch (e) {
+          console.error("Failed to query or create secondary calendars:", e);
+          throw e;
+      }
+  },
+
   fetchEvents: async function() {
     if (!window.AppState.isGoogleLinked || !this.gapiInited) return;
     
@@ -234,22 +276,58 @@ window.Pages.schedule = {
             return;
         }
         
+        // Get or create dedicated calendars first
+        await this.getOrCreateSecondaryCalendars();
+        
         // Broaden fetch range: -1 month to +3 months from current view
         const timeMin = new Date(this.currentDate.getFullYear(), this.currentDate.getMonth() - 1, 1).toISOString();
         const timeMax = new Date(this.currentDate.getFullYear(), this.currentDate.getMonth() + 4, 0).toISOString();
         
-        const response = await gapi.client.calendar.events.list({
-            calendarId: 'primary',
-            timeMin: timeMin,
-            timeMax: timeMax,
-            showDeleted: false,
-            singleEvents: true,
-            maxResults: 500,
-            orderBy: 'startTime',
-        });
+        let projItems = [];
+        let salesItems = [];
         
-        this.googleEvents = response.result.items || [];
-        console.log(`✅ Synced ${this.googleEvents.length} events from Google`);
+        try {
+            const resp = await gapi.client.calendar.events.list({
+                calendarId: this.projectsCalendarId,
+                timeMin: timeMin,
+                timeMax: timeMax,
+                showDeleted: false,
+                singleEvents: true,
+                maxResults: 500,
+                orderBy: 'startTime',
+            });
+            projItems = resp.result.items || [];
+            projItems.forEach(item => { item.calendarId = this.projectsCalendarId; });
+        } catch (e) {
+            console.warn("Failed to fetch events from NexAI Projects calendar:", e);
+            if (e.status === 404) {
+                this.projectsCalendarId = null;
+                throw e; // Propagate to force self-healing / recreation on next sync
+            }
+        }
+        
+        try {
+            const resp = await gapi.client.calendar.events.list({
+                calendarId: this.salesCalendarId,
+                timeMin: timeMin,
+                timeMax: timeMax,
+                showDeleted: false,
+                singleEvents: true,
+                maxResults: 500,
+                orderBy: 'startTime',
+            });
+            salesItems = resp.result.items || [];
+            salesItems.forEach(item => { item.calendarId = this.salesCalendarId; });
+        } catch (e) {
+            console.warn("Failed to fetch events from NexAI Sales Demos calendar:", e);
+            if (e.status === 404) {
+                this.salesCalendarId = null;
+                throw e; // Propagate to force self-healing / recreation on next sync
+            }
+        }
+        
+        this.googleEvents = [...projItems, ...salesItems];
+        console.log(`✅ Synced ${this.googleEvents.length} events from Google dedicated calendars`);
         if (this.googleEvents.length === 0) {
             console.warn('No events found in the selected time range for this account.');
         }
@@ -282,16 +360,37 @@ window.Pages.schedule = {
             window.saveState();
         }
 
+        // Real-time collaborative sync: Automatically sync new and edited tasks to this user's Google Calendar
+        this.syncLocalTasksToGoogle().catch(err => console.warn('Background auto-sync portal tasks to Google failed:', err));
+
         this.triggerUpdate();
     } catch (err) {
-        console.warn('Sync failed (likely expired token), attempting silent re-auth...');
-        if (err.status === 401) {
+        console.error('❌ Google Calendar Sync failed:', err);
+        
+        // Extract status code from various possible formats in gapi responses
+        const status = err.status || 
+                       (err.result && err.result.error && err.result.error.code) || 
+                       (err.error && err.error.code);
+                       
+        const message = err.message || 
+                        (err.result && err.result.error && err.result.error.message) || 
+                        (err.error && err.error.message) ||
+                        "Unknown error";
+                        
+        console.warn(`[Schedule Sync] Error status: ${status}, Message: ${message}`);
+        
+        // 401 (Unauthorized) or 403 (Forbidden - missing calendar scopes/permission denied)
+        if (status === 401 || status === 403 || message.toLowerCase().includes("auth") || message.toLowerCase().includes("permission") || message.toLowerCase().includes("scope") || message.toLowerCase().includes("unauthorized") || message.toLowerCase().includes("forbidden")) {
+            console.warn('⚠️ Access revoked or insufficient scopes. Clearing Google Link status.');
             if (window.clearGoogleCalendarToken) window.clearGoogleCalendarToken();
             if (gapi.client.setToken) gapi.client.setToken(null);
             window.AppState.isGoogleLinked = false;
             window.saveState();
             this.triggerUpdate();
         }
+        
+        // Rethrow the error so that the manual sync button knows it failed and doesn't display success
+        throw err;
     }
   },
 
@@ -313,7 +412,7 @@ window.Pages.schedule = {
     return this.GOOGLE_COLORS[colorId] || '#5484ed'; // Default to Blueberry
   },
 
-  createGoogleEvent: async function(sch) {
+  createGoogleEvent: async function(sch, skipFetch = false) {
     if (!window.AppState.isGoogleLinked || !this.gapiInited) return;
     
     // Construct time for Google (Default to 1 hour duration)
@@ -332,12 +431,25 @@ window.Pages.schedule = {
     };
 
     try {
+        const calendarId = sch.type === 'Project' ? this.projectsCalendarId : this.salesCalendarId;
+        if (!calendarId) {
+            console.warn(`[createGoogleEvent] No calendar ID found for type ${sch.type}, defaulting to Projects`);
+        }
         const resp = await gapi.client.calendar.events.insert({
-            'calendarId': 'primary',
+            'calendarId': calendarId || this.projectsCalendarId,
             'resource': event
         });
         console.log('🚀 Event synced to mobile successfully:', resp.result);
-        await this.fetchEvents();
+        
+        if (resp.result && resp.result.id) {
+            // Attach the calendar ID to the cache entry
+            resp.result.calendarId = calendarId || this.projectsCalendarId;
+            this.googleEvents.push(resp.result);
+        }
+        
+        if (!skipFetch) {
+            await this.fetchEvents();
+        }
         return resp.result.id; // Return the ID for internal tracking
     } catch (err) {
         console.error('❌ Failed to push to Google:', err);
@@ -356,28 +468,56 @@ window.Pages.schedule = {
     if (!window.AppState.isGoogleLinked || !this.gapiInited) return;
     if (this.isBulkSyncing) return;
     
-    console.log('📦 Starting Retroactive Bulk Sync...');
-    const unsynced = (window.AppState.schedules || []).filter(s => !this.getScheduleGoogleEventId(s));
-    
-    if (unsynced.length === 0) {
-        console.log('✅ No unsynced tasks found.');
-        return;
-    }
-
-    let syncCount = 0;
+    console.log('📦 Starting real-time two-way Google Calendar synchronization...');
     this.isBulkSyncing = true;
+    let syncCount = 0;
+    let stateChanged = false;
+    
     try {
-        for (const sch of unsynced) {
-            const eventId = await this.withTimeout(this.createGoogleEvent(sch), 18000, 'Google Calendar create');
-            if (eventId) {
-                // Mark as synced with the unique digital fingerprint for this Firebase user.
-                const idx = window.AppState.schedules.findIndex(s => s.id === sch.id);
-                if (idx !== -1) {
-                    this.setScheduleGoogleEventId(window.AppState.schedules[idx], eventId);
-                    if (window.saveScheduleToFirestore) {
-                        await this.withTimeout(window.saveScheduleToFirestore(window.AppState.schedules[idx]), 10000, 'Firebase schedule save');
+        const schedules = window.AppState.schedules || [];
+        for (const sch of schedules) {
+            const googleEventId = this.getScheduleGoogleEventId(sch);
+            
+            if (!googleEventId) {
+                // Case 1: Unsynced task - create it on Google Calendar
+                console.log(`➕ Auto-sync: Creating event for ${sch.client}`);
+                const eventId = await this.withTimeout(this.createGoogleEvent(sch, true), 18000, 'Google Calendar create');
+                if (eventId) {
+                    const idx = window.AppState.schedules.findIndex(s => s.id === sch.id);
+                    if (idx !== -1) {
+                        this.setScheduleGoogleEventId(window.AppState.schedules[idx], eventId);
+                        if (window.saveScheduleToFirestore) {
+                            await this.withTimeout(window.saveScheduleToFirestore(window.AppState.schedules[idx]), 10000, 'Firebase schedule save');
+                        }
+                        syncCount++;
+                        stateChanged = true;
                     }
-                    syncCount++;
+                }
+            } else {
+                // Case 2: Synced task - verify and push updates if out of sync
+                const remoteEvent = this.googleEvents.find(e => e.id === googleEventId);
+                if (remoteEvent) {
+                    // Reconstruct expected start/end dates
+                    const [year, month, day] = sch.date.split('-').map(Number);
+                    const timeStr = sch.time && sch.time.includes(':') ? sch.time : '09:00';
+                    const [hour, min] = timeStr.split(':').map(Number);
+                    
+                    const start = new Date(year, month - 1, day, hour, min);
+                    const expectedStart = start.toISOString();
+                    const expectedSummary = `${sch.type}: ${sch.client}`;
+                    
+                    const remoteStart = remoteEvent.start.dateTime || remoteEvent.start.date;
+                    
+                    // Fuzzy match safety: Check if summary or start date/time differ
+                    const isOutOfSync = 
+                        remoteEvent.summary !== expectedSummary ||
+                        new Date(remoteStart).getTime() !== new Date(expectedStart).getTime() ||
+                        remoteEvent.colorId !== sch.colorId;
+                        
+                    if (isOutOfSync) {
+                        console.log(`🔄 Auto-sync: Updating modified event ${sch.client} on Google Calendar`);
+                        await this.withTimeout(this.updateGoogleEvent(googleEventId, sch, true), 18000, 'Google Calendar update');
+                    }
                 }
             }
         }
@@ -385,30 +525,38 @@ window.Pages.schedule = {
         this.isBulkSyncing = false;
     }
 
-    if (syncCount > 0) {
+    if (stateChanged || syncCount > 0) {
         window.saveState();
-        console.log(`🚀 Bulk Sync Complete: ${syncCount} tasks pushed to Google.`);
+        console.log(`🚀 Sync Complete: ${syncCount} new tasks pushed to Google.`);
     }
   },
 
-  updateGoogleEvent: async function(eventId, sch) {
+  updateGoogleEvent: async function(eventId, sch, skipFetch = false) {
     if (!window.AppState.isGoogleLinked) return;
     
-    const startDateTime = `${sch.date}T${sch.time || '09:00'}:00`;
-    const endDateTime = `${sch.date}T${(parseInt(sch.time?.split(':')[0] || '09') + 1).toString().padStart(2,'0')}:${sch.time?.split(':')[1] || '00'}:00`;
+    const [year, month, day] = sch.date.split('-').map(Number);
+    const timeStr = sch.time && sch.time.includes(':') ? sch.time : '09:00';
+    const [hour, min] = timeStr.split(':').map(Number);
+    
+    const start = new Date(year, month - 1, day, hour, min);
+    const end = new Date(start.getTime() + (60 * 60 * 1000));
 
     const eventPatch = {
         'summary': `${sch.type}: ${sch.client}`,
         'description': `Status: ${sch.status}\nAssignee: ${sch.assignee || 'Unassigned'}\nAssignor: ${sch.assignor || 'Agent 1'}`,
-        'start': { 'dateTime': new Date(startDateTime).toISOString() },
-        'end': { 'dateTime': new Date(endDateTime).toISOString() },
+        'start': { 'dateTime': start.toISOString() },
+        'end': { 'dateTime': end.toISOString() },
         'colorId': sch.colorId
     };
 
     try {
+        const calendarId = sch.type === 'Project' ? this.projectsCalendarId : this.salesCalendarId;
+        if (!calendarId) {
+            console.warn(`[updateGoogleEvent] No calendar ID found for type ${sch.type}, defaulting to Projects`);
+        }
         await Promise.race([
           gapi.client.calendar.events.patch({
-            'calendarId': 'primary',
+            'calendarId': calendarId || this.projectsCalendarId,
             'eventId': eventId,
             'resource': eventPatch
           }),
@@ -422,26 +570,51 @@ window.Pages.schedule = {
                 description: eventPatch.description,
                 start: eventPatch.start,
                 end: eventPatch.end,
-                colorId: eventPatch.colorId
+                colorId: eventPatch.colorId,
+                calendarId: calendarId || this.projectsCalendarId
             };
         }
-        this.fetchEvents().catch(err => console.warn('Post-update calendar refresh failed:', err));
+        if (!skipFetch) {
+            this.fetchEvents().catch(err => console.warn('Post-update calendar refresh failed:', err));
+        }
     } catch (err) {
         console.error('Error updating event:', err);
         throw err;
     }
   },
 
-  deleteGoogleEvent: async function(eventId) {
+  deleteGoogleEvent: async function(eventId, sch = null) {
     if (!window.AppState.isGoogleLinked) return;
     try {
+        let calendarId = null;
+        const gItem = this.googleEvents.find(e => e.id === eventId);
+        if (gItem && gItem.calendarId) {
+            calendarId = gItem.calendarId;
+        } else if (sch) {
+            calendarId = sch.type === 'Project' ? this.projectsCalendarId : this.salesCalendarId;
+        }
+        
+        if (!calendarId) {
+            console.warn(`[deleteGoogleEvent] No calendar ID found for event ${eventId}, defaulting to Projects`);
+            calendarId = this.projectsCalendarId;
+        }
+        
+        if (!calendarId) {
+            throw new Error("Calendar IDs not loaded. Please try syncing again.");
+        }
+        
         await gapi.client.calendar.events.delete({
-            'calendarId': 'primary',
+            'calendarId': calendarId,
             'eventId': eventId
         });
         await this.fetchEvents();
     } catch (err) {
         console.error('Error deleting event:', err);
+        const status = err.status || (err.result?.error?.code) || (err.error?.code);
+        if (status !== 404) {
+            throw err; // Propagate non-404 failures
+        }
+        console.log(`[deleteGoogleEvent] Event already deleted on Google side (404 status received)`);
     }
   },
 
@@ -537,14 +710,49 @@ window.Pages.schedule = {
            </div>
         </div>
         <div style="display:flex; gap: 12px; align-items: center;">
-
-            <div id="google-link-status" style="cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 12px; background: ${window.AppState.isGoogleLinked ? 'rgba(0, 255, 136, 0.1)' : 'rgba(255, 77, 77, 0.1)'}; border: 1.5px solid ${window.AppState.isGoogleLinked ? '#00ff88' : '#ff4d4d'};">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 256 262" preserveAspectRatio="xMidYMid"><path fill="#4285F4" d="M255.878 133.451c0-10.734-.871-18.567-2.756-26.69H130.55v50.854h70.028c-2.176 13.925-11.319 32.185-28.583 45.023l-.22.146 41.139 31.848.286.2c26.242-24.225 42.678-59.858 42.678-101.381"/><path fill="#34A853" d="M130.55 261.1c35.242 0 64.839-11.605 86.453-31.622l-41.205-31.994c-11.319 7.834-26.101 13.06-45.248 13.06-34.808 0-64.405-23.069-74.996-54.834l-.479.041-42.743 33.102-.559.458C33.342 235.158 79.176 261.1 130.55 261.1"/><path fill="#FBBC05" d="M55.554 155.751c-2.756-8.124-4.351-16.83-4.351-25.751 0-8.92 1.595-17.627 4.206-25.751l-.058-.696-42.76-33.204-.555.267C3.047 88.75 0 108.625 0 129.999c0 21.375 3.047 41.25 9.04 59.382l46.514-33.63"/><path fill="#EB4335" d="M130.55 51.157c24.367 0 41.139 10.59 50.422 19.294l37.863-36.988C194.989 12.839 164.512 0 130.55 0 79.176 0 33.342 25.942 9.04 63.383l46.441 36.05c10.591-31.765 40.188-54.833 75.069-54.833"/></svg>
-              <span style="font-size:0.85rem; font-weight:800; color:${window.AppState.isGoogleLinked ? '#00ff88' : '#ff4d4d'}">${window.AppState.isGoogleLinked ? 'Synced' : 'Link Google'}</span>
+          <!-- Filter Checkbox Pills -->
+          <div style="display:flex; gap: 8px; align-items: center; margin-right: 4px;">
+            <!-- Project Filter Pill -->
+            <div id="filter-pill-project" style="cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 20px; 
+                 background: ${this.filters.project ? 'rgba(255, 184, 120, 0.15)' : 'transparent'}; 
+                 border: 1.5px solid ${this.filters.project ? '#ffb878' : 'rgba(255, 184, 120, 0.3)'}; 
+                 color: ${this.filters.project ? '#ffb878' : 'var(--text-muted)'}; 
+                 font-size: 0.75rem; font-weight: 800; height: 38px; box-sizing: border-box; transition: all 0.2s;
+                 box-shadow: ${this.filters.project ? '0 0 10px rgba(255, 184, 120, 0.2)' : 'none'};"
+                 onmouseover="this.style.background='rgba(255, 184, 120, 0.25)'; this.style.borderColor='#ffb878'; this.style.color='#ffb878';"
+                 onmouseout="this.style.background='${this.filters.project ? 'rgba(255, 184, 120, 0.15)' : 'transparent'}'; this.style.borderColor='${this.filters.project ? '#ffb878' : 'rgba(255, 184, 120, 0.3)'}'; this.style.color='${this.filters.project ? '#ffb878' : 'var(--text-muted)'}';">
+              <span style="font-size: 0.85rem;">${this.filters.project ? '☑' : '☐'}</span>
+              <span>PROJECT</span>
             </div>
-           <button id="btn-add-schedule" style="padding: 10px 22px; border-radius: 12px; border: none; background: var(--primary); color: white; cursor: pointer; font-weight: 800; font-size: 0.95rem; box-shadow: 0 4px 15px rgba(242, 89, 0, 0.4); display: flex; align-items: center; gap: 10px;">
-             <span>+</span> New
-           </button>
+            
+            <!-- Sales Demo Filter Pill -->
+            <div id="filter-pill-sales" style="cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 20px; 
+                 background: ${this.filters.sales ? 'rgba(122, 231, 191, 0.15)' : 'transparent'}; 
+                 border: 1.5px solid ${this.filters.sales ? '#7ae7bf' : 'rgba(122, 231, 191, 0.3)'}; 
+                 color: ${this.filters.sales ? '#7ae7bf' : 'var(--text-muted)'}; 
+                 font-size: 0.75rem; font-weight: 800; height: 38px; box-sizing: border-box; transition: all 0.2s;
+                 box-shadow: ${this.filters.sales ? '0 0 10px rgba(122, 231, 191, 0.2)' : 'none'};"
+                 onmouseover="this.style.background='rgba(122, 231, 191, 0.25)'; this.style.borderColor='#7ae7bf'; this.style.color='#7ae7bf';"
+                 onmouseout="this.style.background='${this.filters.sales ? 'rgba(122, 231, 191, 0.15)' : 'transparent'}'; this.style.borderColor='${this.filters.sales ? '#7ae7bf' : 'rgba(122, 231, 191, 0.3)'}'; this.style.color='${this.filters.sales ? '#7ae7bf' : 'var(--text-muted)'}';">
+              <span style="font-size: 0.85rem;">${this.filters.sales ? '☑' : '☐'}</span>
+              <span>SALES DEMO</span>
+            </div>
+          </div>
+          ${window.AppState.isGoogleLinked ? `
+            <button id="btn-refresh-google" style="background: rgba(255,255,255,0.05); border: 1.5px solid ${this.isGoogleSyncing ? 'var(--primary)' : (this.googleSyncSuccess ? 'var(--success)' : 'var(--border-color)')}; padding: 8px 12px; border-radius: 12px; color: ${this.isGoogleSyncing ? 'var(--primary)' : (this.googleSyncSuccess ? 'var(--success)' : 'var(--text-main)')}; font-weight: 800; cursor: pointer; display: flex; align-items: center; justify-content: center; height: 38px; width: 38px; transition: all 0.2s; outline: none;" 
+                    title="${this.isGoogleSyncing ? 'Syncing...' : 'Sync with Google Calendar'}"
+                    onmouseover="this.style.borderColor='var(--primary)'; this.style.color='var(--primary)';" 
+                    onmouseout="this.style.borderColor='${this.isGoogleSyncing ? 'var(--primary)' : (this.googleSyncSuccess ? 'var(--success)' : 'var(--border-color)')}'; this.style.color='${this.isGoogleSyncing ? 'var(--primary)' : (this.googleSyncSuccess ? 'var(--success)' : 'var(--text-main)')}';">
+              <svg id="refresh-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transition: transform 0.8s ease; ${this.isGoogleSyncing ? 'animation: spin 1s linear infinite;' : ''}"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+            </button>
+          ` : ''}
+          <div id="google-link-status" style="cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 12px; background: ${window.AppState.isGoogleLinked ? 'rgba(0, 255, 136, 0.1)' : 'rgba(255, 77, 77, 0.1)'}; border: 1.5px solid ${window.AppState.isGoogleLinked ? '#00ff88' : '#ff4d4d'}; height: 38px; box-sizing: border-box;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 256 262" preserveAspectRatio="xMidYMid"><path fill="#4285F4" d="M255.878 133.451c0-10.734-.871-18.567-2.756-26.69H130.55v50.854h70.028c-2.176 13.925-11.319 32.185-28.583 45.023l-.22.146 41.139 31.848.286.2c26.242-24.225 42.678-59.858 42.678-101.381"/><path fill="#34A853" d="M130.55 261.1c35.242 0 64.839-11.605 86.453-31.622l-41.205-31.994c-11.319 7.834-26.101 13.06-45.248 13.06-34.808 0-64.405-23.069-74.996-54.834l-.479.041-42.743 33.102-.559.458C33.342 235.158 79.176 261.1 130.55 261.1"/><path fill="#FBBC05" d="M55.554 155.751c-2.756-8.124-4.351-16.83-4.351-25.751 0-8.92 1.595-17.627 4.206-25.751l-.058-.696-42.76-33.204-.555.267C3.047 88.75 0 108.625 0 129.999c0 21.375 3.047 41.25 9.04 59.382l46.514-33.63"/><path fill="#EB4335" d="M130.55 51.157c24.367 0 41.139 10.59 50.422 19.294l37.863-36.988C194.989 12.839 164.512 0 130.55 0 79.176 0 33.342 25.942 9.04 63.383l46.441 36.05c10.591-31.765 40.188-54.833 75.069-54.833"/></svg>
+            <span style="font-size:0.85rem; font-weight:800; color:${window.AppState.isGoogleLinked ? '#00ff88' : '#ff4d4d'}">${window.AppState.isGoogleLinked ? 'Synced' : 'Link Google'}</span>
+          </div>
+          <button id="btn-add-schedule" style="padding: 10px 22px; border-radius: 12px; border: none; background: var(--primary); color: white; cursor: pointer; font-weight: 800; font-size: 0.95rem; box-shadow: 0 4px 15px rgba(242, 89, 0, 0.4); display: flex; align-items: center; gap: 10px; height: 38px;">
+            <span>+</span> New
+          </button>
         </div>
       </div>
 
@@ -716,7 +924,31 @@ window.Pages.schedule = {
         return new Date(start).toDateString() === ds;
     });
 
-    let html = local.map(e => {
+    const isEventProject = (e) => {
+        if (e.calendarId && e.calendarId === this.projectsCalendarId) return true;
+        const summary = (e.summary || '').toLowerCase();
+        return summary.startsWith('project:') || summary.includes('project');
+    };
+    
+    const isEventSales = (e) => {
+        if (e.calendarId && e.calendarId === this.salesCalendarId) return true;
+        const summary = (e.summary || '').toLowerCase();
+        return summary.startsWith('sales:') || summary.includes('sales') || summary.includes('demo');
+    };
+
+    let filteredLocal = local.filter(s => {
+        if (s.type === 'Project' && !this.filters.project) return false;
+        if (s.type === 'Sales' && !this.filters.sales) return false;
+        return true;
+    });
+
+    let filteredGoogle = google.filter(e => {
+        if (isEventProject(e) && !this.filters.project) return false;
+        if (isEventSales(e) && !this.filters.sales) return false;
+        return true;
+    });
+
+    let html = filteredLocal.map(e => {
         const color = this.GOOGLE_COLORS[e.colorId] || (e.type === 'Project' ? '#f25900' : '#10b981');
         return `
             <div class="event-bar" 
@@ -729,7 +961,7 @@ window.Pages.schedule = {
         `;
     }).join('');
 
-    html += google.map(e => {
+    html += filteredGoogle.map(e => {
         const color = this.getGoogleColor(e.colorId);
         return `
             <div class="event-bar event-google" 
@@ -747,6 +979,18 @@ window.Pages.schedule = {
   renderCombinedEventsByType: function(date, typeOrSource) {
     const ds = date.toDateString();
     let events = [];
+
+    const isEventProject = (e) => {
+        if (e.calendarId && e.calendarId === this.projectsCalendarId) return true;
+        const summary = (e.summary || '').toLowerCase();
+        return summary.startsWith('project:') || summary.includes('project');
+    };
+    
+    const isEventSales = (e) => {
+        if (e.calendarId && e.calendarId === this.salesCalendarId) return true;
+        const summary = (e.summary || '').toLowerCase();
+        return summary.startsWith('sales:') || summary.includes('sales') || summary.includes('demo');
+    };
 
     if (typeOrSource === 'Google') {
         const localSchedules = window.AppState.schedules || [];
@@ -774,6 +1018,10 @@ window.Pages.schedule = {
             const normalizedSummary = (e.summary || '').replace(/^(Project|Sales): /, '').toLowerCase();
             if (localTitlesToday.includes(normalizedSummary)) return false;
 
+            // Apply filter checkbox checks
+            if (isEventProject(e) && !this.filters.project) return false;
+            if (isEventSales(e) && !this.filters.sales) return false;
+
             return true;
         }).map(e => ({
             id: e.id,
@@ -786,15 +1034,22 @@ window.Pages.schedule = {
             color: this.getGoogleColor(e.colorId)
         }));
     } else {
-        events = (window.AppState.schedules || [])
-            .filter(s => {
-                const eventDate = this.parseDate(s.date);
-                return eventDate.getFullYear() === date.getFullYear() && 
-                       eventDate.getMonth() === date.getMonth() && 
-                       eventDate.getDate() === date.getDate() &&
-                       s.type === typeOrSource;
-            })
-            .map(s => ({ ...s, source: 'local' }));
+        // Apply type-specific checklist filtering
+        if (typeOrSource === 'Project' && !this.filters.project) {
+            events = [];
+        } else if (typeOrSource === 'Sales' && !this.filters.sales) {
+            events = [];
+        } else {
+            events = (window.AppState.schedules || [])
+                .filter(s => {
+                    const eventDate = this.parseDate(s.date);
+                    return eventDate.getFullYear() === date.getFullYear() && 
+                           eventDate.getMonth() === date.getMonth() && 
+                           eventDate.getDate() === date.getDate() &&
+                           s.type === typeOrSource;
+                })
+                .map(s => ({ ...s, source: 'local' }));
+        }
     }
     
     if (events.length === 0) return `<p style="color: var(--text-muted); font-size: 0.9rem; font-style: italic;">No ${typeOrSource === 'Google' ? 'Pending Requests' : typeOrSource + 's'} scheduled</p>`;
@@ -954,6 +1209,16 @@ window.Pages.schedule = {
   afterRender: function() {
     const bind = (id, fn) => { const el = document.getElementById(id); if(el) el.onclick = fn; };
     
+    bind('filter-pill-project', () => {
+        this.filters.project = !this.filters.project;
+        this.triggerUpdate();
+    });
+
+    bind('filter-pill-sales', () => {
+        this.filters.sales = !this.filters.sales;
+        this.triggerUpdate();
+    });
+    
     bind('cal-prev', () => {
       if (this.viewMode === 'month') this.currentDate.setMonth(this.currentDate.getMonth() - 1);
       else if (this.viewMode === 'week') this.currentDate.setDate(this.currentDate.getDate() - 7);
@@ -980,6 +1245,30 @@ window.Pages.schedule = {
     });
 
     bind('google-link-status', () => this.handleAuthClick());
+    
+    bind('btn-refresh-google', async () => {
+        if (this.isGoogleSyncing) return;
+        this.isGoogleSyncing = true;
+        this.googleSyncSuccess = false;
+        this.triggerUpdate();
+        
+        try {
+            await this.fetchEvents();
+            this.googleSyncSuccess = true;
+        } catch (e) {
+            console.error("Manual Google Sync Error:", e);
+        } finally {
+            this.isGoogleSyncing = false;
+            this.triggerUpdate();
+            
+            if (this.googleSyncSuccess) {
+                setTimeout(() => {
+                    this.googleSyncSuccess = false;
+                    this.triggerUpdate();
+                }, 1500);
+            }
+        }
+    });
     
     bind('btn-sync-cloud', async () => {
         const btn = document.getElementById('btn-sync-cloud');
@@ -1037,23 +1326,54 @@ window.Pages.schedule = {
       if (!this.editingItem || !confirm('Are you sure you want to delete this task?')) return;
       
       const { id, source } = this.editingItem;
+      const btn = document.getElementById('btn-delete-schedule');
+      const originalText = btn ? btn.innerHTML : 'Delete Task';
       
-      if (source === 'local') {
-          const sch = window.AppState.schedules.find(s => s.id === id);
-          const googleEventId = this.getScheduleGoogleEventId(sch);
-          if (sch && googleEventId && window.AppState.isGoogleLinked) {
-              await this.deleteGoogleEvent(googleEventId);
-          }
-          window.AppState.schedules = window.AppState.schedules.filter(s => s.id !== id);
-          if (window.deleteScheduleFromFirestore) window.deleteScheduleFromFirestore(id);
-          window.saveState();
-      } else {
-          await this.deleteGoogleEvent(id);
+      if (btn) {
+          btn.disabled = true;
+          btn.style.background = 'rgba(239, 68, 68, 0.3)';
+          btn.innerHTML = `
+              <div class="spinner-small" style="width: 14px; height: 14px; border: 2px solid rgba(239,68,68,0.3); border-top-color: #EF4444; border-radius: 50%; display: inline-block; vertical-align: middle; margin-right: 6px; animation: spin 0.8s linear infinite;"></div>
+              Deleting...
+          `;
       }
       
-      this.isAddModalOpen = false;
-      this.editingItem = null;
-      this.triggerUpdate();
+      try {
+          if (source === 'local') {
+              const sch = window.AppState.schedules.find(s => s.id === id);
+              const googleEventId = this.getScheduleGoogleEventId(sch);
+              if (sch && googleEventId && window.AppState.isGoogleLinked) {
+                  await this.deleteGoogleEvent(googleEventId, sch);
+              }
+              window.AppState.schedules = window.AppState.schedules.filter(s => s.id !== id);
+              if (window.deleteScheduleFromFirestore) {
+                  await this.withTimeout(window.deleteScheduleFromFirestore(id), 10000, 'Firebase schedule delete');
+              }
+              window.saveState();
+          } else {
+              await this.deleteGoogleEvent(id);
+          }
+          
+          this.isAddModalOpen = false;
+          this.editingItem = null;
+          this.triggerUpdate();
+      } catch (err) {
+          console.error("❌ Delete Schedule Failed:", err);
+          let errMsg = "Failed to delete the event from Google Calendar. The local copy was kept to maintain sync integrity.";
+          const status = err.status || (err.result?.error?.code) || (err.error?.code);
+          const message = err.message || (err.result?.error?.message) || (err.error?.message);
+          if (status) {
+              errMsg += `\nError ${status}: ${message || 'Permission or Connection issue'}`;
+          }
+          alert(errMsg);
+          
+          // Re-enable button
+          if (btn) {
+              btn.disabled = false;
+              btn.style.background = 'rgba(239, 68, 68, 0.1)';
+              btn.innerHTML = originalText;
+          }
+      }
     });
 
     document.querySelectorAll('.type-btn').forEach(el => {
@@ -1159,6 +1479,10 @@ window.Pages.schedule = {
                       await this.withTimeout(window.saveScheduleToFirestore(syncedSch), 10000, 'Firebase schedule save');
                   }
                   window.saveState();
+                  
+                  if (window.AppState.isGoogleLinked) {
+                      await this.withTimeout(this.updateGoogleEvent(id, syncedSch), 18000, 'Google Calendar update');
+                  }
               }
           } else {
               const newSch = {

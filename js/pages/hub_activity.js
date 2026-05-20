@@ -604,15 +604,15 @@ window.Pages.inventory_activity = {
 
     const confirmRevert = document.getElementById('btn-confirm-revert');
     if (confirmRevert) {
-      confirmRevert.onclick = () => {
-        this.performReversal(this.confirmDeleteId);
+      confirmRevert.onclick = async () => {
+        await this.performReversal(this.confirmDeleteId);
         this.confirmDeleteId = null;
         this.triggerUpdate();
       };
     }
   },
 
-  performReversal: function(activityId) {
+  performReversal: async function(activityId) {
     const state = window.AppState;
     const actIdx = state.hubActivities.findIndex(a => a.id === activityId);
     if (actIdx === -1) return;
@@ -681,8 +681,51 @@ window.Pages.inventory_activity = {
     state.hubActivities.splice(actIdx, 1);
     state.hubActivities.push(contraAct);
 
-    // Save
+    // Save locally
     if (window.incInventoryVersion) window.incInventoryVersion();
+
+    // 4. SYNC TO FIRESTORE
+    if (window.firebaseDb) {
+      try {
+        const db = window.firebaseDb;
+        const batch = db.batch();
+
+        // A. Delete the reverted activity document from cloud
+        batch.delete(db.collection("inventory_module").doc("data").collection("hub_activities").doc(originalAct.id));
+
+        // B. Write the new contra activity document to cloud
+        batch.set(db.collection("inventory_module").doc("data").collection("hub_activities").doc(contraAct.id), contraAct);
+
+        // C. Update the modified inventory item documents in cloud
+        originalAct.items.forEach(item => {
+          const targetArea = item.area || originalAct.area;
+          if (originalAct.type === 'transfer') {
+            const match = targetArea.match(/(.+) ➔ (.+)/);
+            if (match) {
+              const from = match[1].trim();
+              const to = match[2].trim();
+              
+              const fromInv = state.inventory.find(i => i.productId === item.productId && i.area === from);
+              const toInv = state.inventory.find(i => i.productId === item.productId && i.area === to);
+              
+              if (fromInv) batch.set(db.collection("inventory_module").doc("data").collection("items").doc(fromInv.productId + '_' + fromInv.area), fromInv);
+              if (toInv) batch.set(db.collection("inventory_module").doc("data").collection("items").doc(toInv.productId + '_' + toInv.area), toInv);
+            }
+          } else {
+            const invItem = state.inventory.find(i => i.productId === item.productId && i.area === targetArea);
+            if (invItem) {
+              batch.set(db.collection("inventory_module").doc("data").collection("items").doc(invItem.productId + '_' + invItem.area), invItem);
+            }
+          }
+        });
+
+        await batch.commit();
+        console.log("⚡ Delta Sync complete for Reversal Operation");
+      } catch (e) {
+        console.error("Reversal Delta Sync Error:", e);
+      }
+    }
+
     if (window.saveState) window.saveState();
   },
 

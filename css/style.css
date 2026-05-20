@@ -1176,3 +1176,181 @@ input:checked + .nex-slider:before {
 .scorecard-inactive.selected { border-color: #94a3b8 !important; }
 .scorecard-soon.selected { border-color: #ffcc00 !important; }
 .scorecard-expired.selected { border-color: #ff4d4d !important; }
+
+/* Hide Number Input Spinners globally */
+input::-webkit-outer-spin-button,
+input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type=number] {
+  -moz-appearance: textfield;
+}
+
+/* ==========================================================================
+   STOCK MARKET TERMINAL UI - BRANDED ORANGE + DARK GRAY
+   ========================================================================== */
+
+/* Main Telemetry Card */
+.stock-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-left: 4px solid var(--border-color);
+  border-radius: 14px;
+  padding: 24px;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+}
+
+.stock-card.rank-1 {
+  border-left: 4px solid var(--primary);
+}
+
+.stock-card:hover {
+  transform: translateY(-4px);
+  border-color: var(--primary);
+  border-left: 4px solid var(--primary);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.15), 0 0 20px rgba(242, 89, 0, 0.12);
+}
+
+/* Pulsing Orange Live Indicator */
+.stock-badge-live-orange {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.65rem;
+  font-weight: 800;
+  color: var(--primary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: rgba(242, 89, 0, 0.08);
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(242, 89, 0, 0.18);
+  font-family: monospace;
+}
+
+.stock-badge-live-orange::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background-color: var(--primary);
+  border-radius: 50%;
+  box-shadow: 0 0 8px var(--primary);
+  animation: stock-pulse-orange 1.8s infinite;
+}
+
+@keyframes stock-pulse-orange {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.5;
+    box-shadow: 0 0 0 0 rgba(242, 89, 0, 0.7);
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 1;
+    box-shadow: 0 0 0 6px rgba(242, 89, 0, 0);
+  }
+  100% {
+    transform: scale(0.9);
+    opacity: 0.5;
+    box-shadow: 0 0 0 0 rgba(242, 89, 0, 0);
+  }
+}
+
+/* Stock Gain Badge */
+.stock-gain-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  font-weight: 800;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-family: monospace;
+}
+
+.stock-gain-badge.positive {
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.stock-gain-badge.negative {
+  color: var(--primary);
+  background: rgba(242, 89, 0, 0.08);
+  border: 1px solid rgba(242, 89, 0, 0.2);
+}
+
+.stock-gain-badge.neutral {
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-color);
+}
+
+/* Outlined Ticker Pill Buttons */
+.btn-stock-action-view {
+  flex: 1;
+  padding: 11px 16px;
+  background: transparent;
+  border: 1.5px solid var(--border-color);
+  color: var(--text-main);
+  font-weight: 700;
+  font-size: 0.8rem;
+  border-radius: 20px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  font-family: inherit;
+}
+
+.btn-stock-action-view:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--text-main);
+  transform: scale(1.02);
+}
+
+.btn-stock-action-view:active {
+  transform: scale(0.98);
+}
+
+.btn-stock-action-edit {
+  flex: 1;
+  padding: 11px 16px;
+  background: var(--primary);
+  border: 1.5px solid var(--primary);
+  color: white;
+  font-weight: 700;
+  font-size: 0.8rem;
+  border-radius: 20px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 8px rgba(242, 89, 0, 0.25);
+  font-family: inherit;
+}
+
+.btn-stock-action-edit:hover {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
+  box-shadow: 0 4px 15px rgba(242, 89, 0, 0.4);
+  transform: scale(1.02);
+}
+
+.btn-stock-action-edit:active {
+  transform: scale(0.98);
+}
+

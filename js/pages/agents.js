@@ -3,6 +3,10 @@ window.Pages = window.Pages || {};
 window.Pages.agents = {
   editingAgent: null,
   viewingAgent: null,
+  viewFilterMonth: null,
+  viewFilterYear: null,
+  viewActiveYear: null,
+  isViewCalendarOpen: false,
 
   getSalesAgents: function() {
     const invoices = window.AppState.invoices || [];
@@ -22,7 +26,7 @@ window.Pages.agents = {
 
       const amt = parseFloat(inv.totalSales) || 0;
 
-      // Parse invoice date (dd/mm/yyyy) for YTD
+      // Parse invoice date (dd/mm/yyyy) for YTD and monthly tracking
       let invDate = null;
       if (inv.date) {
         const parts = inv.date.split('/');
@@ -31,20 +35,11 @@ window.Pages.agents = {
         }
       }
 
-      // Parse loaded date (dd/mm/yyyy) for monthly tracking
-      let loadDate = null;
-      if (inv.loadedDate) {
-        const lp = inv.loadedDate.split('/');
-        if (lp.length === 3) {
-          loadDate = new Date(+lp[2], +lp[1] - 1, +lp[0]);
-        }
-      }
-
       // Total Revenue: all invoices for this agent
       agentMap[name].totalYTD += amt;
 
-      // Current month: based on loaded/upload date
-      if (loadDate && loadDate.getFullYear() === currentYear && loadDate.getMonth() === currentMonth) {
+      // Current month: based on invoice date
+      if (invDate && invDate.getFullYear() === currentYear && invDate.getMonth() === currentMonth) {
         agentMap[name].totalMonth += amt;
         agentMap[name].monthInvoices.push(inv);
       }
@@ -120,7 +115,7 @@ window.Pages.agents = {
         </div>
       ` : `
         <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; margin-bottom: 2rem;">
-          ${agents.map(agent => this.renderAgentCard(agent)).join('')}
+          ${agents.map((agent, idx) => this.renderAgentCard(agent, idx)).join('')}
         </div>
       `}
 
@@ -129,75 +124,194 @@ window.Pages.agents = {
     `;
   },
 
-  renderAgentCard: function(agent) {
+  renderAgentCard: function(agent, idx) {
     const hitTarget = agent.target > 0 && agent.totalMonth >= agent.target;
     const missTarget = agent.target > 0 && agent.totalMonth < agent.target;
-    const monthColor = hitTarget ? '#10b981' : (missTarget ? '#ef4444' : 'var(--text-main)');
-    const monthBg = hitTarget ? 'rgba(16,185,129,0.08)' : (missTarget ? 'rgba(239,68,68,0.08)' : 'rgba(255,255,255,0.03)');
-    const monthBorder = hitTarget ? 'rgba(16,185,129,0.3)' : (missTarget ? 'rgba(239,68,68,0.3)' : 'var(--border-color)');
+    
+    // Ticker symbol construction ($KT, $Tai)
+    const ticker = '$' + agent.name.trim().replace(/\s+/g, '');
+    const rankNum = idx + 1;
 
-    // Progress bar percentage
+    // Progress bar percentage calculation
     const progress = agent.target > 0 ? Math.min((agent.totalMonth / agent.target) * 100, 100) : 0;
-    const progressColor = hitTarget ? '#10b981' : (missTarget ? '#ef4444' : 'var(--primary)');
+
+    // Target performance gain/loss calculations
+    let gainBadge = '';
+    if (agent.target > 0) {
+      if (hitTarget) {
+        const gainVal = ((agent.totalMonth / agent.target) - 1) * 100;
+        gainBadge = `<span class="stock-gain-badge positive">▲ +${gainVal.toFixed(1)}%</span>`;
+      } else {
+        const gapVal = (1 - (agent.totalMonth / agent.target)) * 100;
+        gainBadge = `<span class="stock-gain-badge negative">▼ -${gapVal.toFixed(1)}%</span>`;
+      }
+    } else {
+      gainBadge = '<span class="stock-gain-badge neutral">● UNLISTED</span>';
+    }
+
+    // 1. Dynamic SVG Sparkline - Real chronological invoice trend
+    const allInvoices = (window.AppState.invoices || []).filter(inv => (inv.salesAgent || '').trim() === agent.name);
+    // Sort chronologically
+    allInvoices.sort((a, b) => {
+      const parseD = d => { if (!d) return 0; const p = d.split('/'); return new Date(+p[2], +p[1]-1, +p[0]).getTime(); };
+      return parseD(a.date) - parseD(b.date);
+    });
+
+    const invoiceVals = allInvoices.map(inv => parseFloat(inv.totalSales) || 0);
+    let sparklineHtml = '';
+    if (invoiceVals.length > 0) {
+      // Pad to at least 2 values to plot a line
+      const points = invoiceVals.length === 1 ? [invoiceVals[0], invoiceVals[0]] : invoiceVals;
+      const min = Math.min(...points);
+      const max = Math.max(...points);
+      const range = max - min || 1;
+
+      // Coordinate scaling for SVG: width 120, height 30
+      const w = 120;
+      const h = 30;
+      const svgPoints = points.map((val, i) => {
+        const x = (i / (points.length - 1)) * w;
+        const y = h - ((val - min) / range) * (h - 6) - 3; // Keep padded
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(' ');
+
+      sparklineHtml = `
+        <svg width="120" height="35" style="overflow: visible;" title="Chronological Invoice Trajectory">
+          <defs>
+            <linearGradient id="sparkGrad-${agent.name.replace(/\s+/g, '')}" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--primary)" stop-opacity="0.3"/>
+              <stop offset="100%" stop-color="var(--primary)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <polygon points="0,35 ${svgPoints} 120,35" fill="url(#sparkGrad-${agent.name.replace(/\s+/g, '')})" style="opacity: 0.4;" />
+          <polyline points="${svgPoints}" fill="none" stroke="var(--primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      `;
+    } else {
+      sparklineHtml = `<span style="font-size: 0.65rem; color: var(--text-muted); font-style: italic;">No volume chart</span>`;
+    }
 
     return `
-      <div class="card" style="padding: 0; overflow: hidden; border: 1px solid var(--border-color); transition: all 0.3s; position: relative;">
-        <!-- Header -->
-        <div style="padding: 24px 24px 16px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--border-color);">
-          <div style="width: 52px; height: 52px; border-radius: 50%; background: linear-gradient(135deg, var(--primary), #ff6b35); display: flex; align-items: center; justify-content: center; font-size: 1.4rem; color: white; font-weight: 900; flex-shrink: 0; box-shadow: 0 4px 12px rgba(242,89,0,0.4);">
-            ${agent.name.charAt(0).toUpperCase()}
+      <div class="stock-card ${rankNum === 1 ? 'rank-1' : ''}">
+        <!-- Card Header: Ticker & Status Badge -->
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border-color);">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span class="stock-badge-live-orange">● LIVE</span>
           </div>
-          <div style="flex: 1; min-width: 0;">
-            <div style="font-size: 1.15rem; font-weight: 800; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${agent.name}</div>
-            <div style="font-size: 0.7rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px;">${agent.invoiceIds.length} Invoice${agent.invoiceIds.length !== 1 ? 's' : ''} Tracked</div>
-          </div>
-          ${hitTarget ? '<div style="font-size: 1.4rem;" title="Target Hit!">🏆</div>' : ''}
         </div>
 
-        <!-- Metrics -->
-        <div style="padding: 20px 24px;">
-          <!-- Total Revenue YTD -->
-          <div style="margin-bottom: 16px; padding: 14px; background: rgba(255,251,0,0.05); border: 1px solid rgba(255,251,0,0.2); border-radius: 10px;">
-            <div style="font-size: 0.65rem; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">Total Revenue (YTD)</div>
-            <div style="font-size: 1.5rem; font-weight: 900; color: #fffb00; text-shadow: 0 0 10px rgba(255,251,0,0.3);">RM ${agent.totalYTD.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</div>
+        <!-- Agent Name Header & Invoices count -->
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <div>
+            <div style="font-size: 1.25rem; font-weight: 900; color: var(--primary); line-height: 1.2; font-family: monospace; letter-spacing: 0.5px;">${ticker}</div>
+            <div style="font-size: 0.68rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; margin-top: 4px;">${agent.invoiceIds.length} Invoice${agent.invoiceIds.length !== 1 ? 's' : ''} Tracked</div>
+          </div>
+          <!-- Real SVG Sparkline overlay -->
+          <div style="display: flex; align-items: flex-end; justify-content: flex-end;">
+            ${sparklineHtml}
+          </div>
+        </div>
+
+        <!-- Financial Metrics Container -->
+        <div style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; flex: 1;">
+          <!-- YTD Revenue (Market Cap) -->
+          <div style="padding: 12px 14px; background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 10px; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+              <div style="font-size: 0.6rem; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px;">Market Cap (YTD)</div>
+              <div style="font-size: 1.2rem; font-weight: 900; color: var(--text-main);">RM ${agent.totalYTD.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</div>
+            </div>
+            <div>
+              ${gainBadge}
+            </div>
           </div>
 
-          <!-- Total Sales Month -->
-          <div style="margin-bottom: 16px; padding: 14px; background: ${monthBg}; border: 1px solid ${monthBorder}; border-radius: 10px;">
+          <!-- Monthly Sales (Volume) -->
+          <div style="padding: 12px 14px; background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 10px;">
+            <div style="font-size: 0.6rem; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px;">Volume (Month)</div>
+            <div style="font-size: 1.2rem; font-weight: 900; color: var(--text-main);">RM ${agent.totalMonth.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</div>
+          </div>
+
+          <!-- Target Pacing Bar (Matching User Screenshot Layout) -->
+          <div style="margin-top: 4px; margin-bottom: 4px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-              <div style="font-size: 0.65rem; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Total Sales (Month)</div>
-              ${hitTarget ? '<span style="font-size: 0.6rem; font-weight: 800; color: #10b981; background: rgba(16,185,129,0.15); padding: 2px 8px; border-radius: 4px;">✓ HIT</span>' : ''}
-              ${missTarget ? '<span style="font-size: 0.6rem; font-weight: 800; color: #ef4444; background: rgba(239,68,68,0.15); padding: 2px 8px; border-radius: 4px;">✗ MISS</span>' : ''}
-            </div>
-            <div style="font-size: 1.5rem; font-weight: 900; color: ${monthColor};">RM ${agent.totalMonth.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</div>
-          </div>
-
-          <!-- Target -->
-          <div style="margin-bottom: 16px;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
               <span style="font-size: 0.65rem; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Target</span>
-              <span style="font-size: 0.85rem; font-weight: 800; color: var(--primary);">RM ${agent.target > 0 ? agent.target.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '—'}</span>
+              <span style="font-size: 0.8rem; font-weight: 800; color: var(--primary);">RM ${agent.target > 0 ? agent.target.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '—'}</span>
             </div>
-            ${agent.target > 0 ? `
-              <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden;">
-                <div style="width: ${progress}%; height: 100%; background: ${progressColor}; border-radius: 3px; transition: width 0.5s ease;"></div>
-              </div>
-              <div style="text-align: right; font-size: 0.6rem; color: var(--text-muted); margin-top: 4px; font-weight: 600;">${progress.toFixed(0)}%</div>
-            ` : ''}
+            <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden; border: 1px solid var(--border-color);">
+              <div style="width: ${progress}%; height: 100%; background: var(--primary); border-radius: 3px; transition: width 0.5s ease; box-shadow: 0 0 6px var(--primary);"></div>
+            </div>
+            <div style="text-align: right; font-size: 0.6rem; color: var(--text-muted); margin-top: 4px; font-weight: 600;">${progress.toFixed(0)}%</div>
           </div>
         </div>
 
-        <!-- Action Buttons -->
-        <div style="display: flex; border-top: 1px solid var(--border-color);">
-          <button class="btn-sf-view" data-name="${agent.name}" style="flex: 1; padding: 14px; background: none; border: none; color: var(--primary); font-weight: 800; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; border-right: 1px solid var(--border-color);"
-                  onmouseover="this.style.background='rgba(242,89,0,0.08)'" onmouseout="this.style.background='none'">
+        <!-- Outlined Action Buttons footer -->
+        <div style="display: flex; gap: 10px; border-top: 1px dashed var(--border-color); padding-top: 16px; margin-top: auto;">
+          <button class="btn-stock-action-view btn-sf-view" data-name="${agent.name}">
             👁️ View
           </button>
-          <button class="btn-sf-edit" data-name="${agent.name}" style="flex: 1; padding: 14px; background: none; border: none; color: #00b8ff; font-weight: 800; font-size: 0.85rem; cursor: pointer; transition: all 0.2s;"
-                  onmouseover="this.style.background='rgba(0,184,255,0.08)'" onmouseout="this.style.background='none'">
+          <button class="btn-stock-action-edit btn-sf-edit" data-name="${agent.name}">
             ✏️ Edit
           </button>
         </div>
+      </div>
+    `;
+  },
+
+
+  getMonthName: function(monthIndex) {
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    return monthNames[monthIndex];
+  },
+
+  getMonthShortName: function(idx) {
+    const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return names[idx];
+  },
+
+  renderMonthYearDropdown: function() {
+    const monthShortNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    this.viewActiveYear = this.viewActiveYear || new Date().getFullYear();
+
+    return `
+      <div id="sf-month-year-dropdown" style="position: absolute; top: calc(100% + 6px); right: 0; background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); z-index: 5000; padding: 14px; width: 240px; display: flex; flex-direction: column; gap: 12px; animation: modalIn 0.15s ease-out;">
+        <!-- Year Header Selector -->
+        <div style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 8px; border-bottom: 1px solid var(--border-color);">
+          <button id="sf-prev-year" style="background: rgba(255,255,255,0.05); border: none; border-radius: 4px; color: var(--text-main); font-weight: 800; padding: 4px 10px; cursor: pointer; font-size: 0.85rem;"
+                  onmouseover="this.style.background='rgba(242,89,0,0.1)'; this.style.color='var(--primary)';" onmouseout="this.style.background='rgba(255,255,255,0.05)'; this.style.color='var(--text-main)';">
+            &lt;
+          </button>
+          <span style="font-weight: 800; font-size: 0.95rem; color: var(--text-main);">${this.viewActiveYear}</span>
+          <button id="sf-next-year" style="background: rgba(255,255,255,0.05); border: none; border-radius: 4px; color: var(--text-main); font-weight: 800; padding: 4px 10px; cursor: pointer; font-size: 0.85rem;"
+                  onmouseover="this.style.background='rgba(242,89,0,0.1)'; this.style.color='var(--primary)';" onmouseout="this.style.background='rgba(255,255,255,0.05)'; this.style.color='var(--text-main)';">
+            &gt;
+          </button>
+        </div>
+
+        <!-- Months Grid -->
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+          ${monthShortNames.map((m, idx) => {
+            const isSelected = this.viewFilterMonth === idx && this.viewFilterYear === this.viewActiveYear;
+            const bg = isSelected ? 'var(--primary)' : 'rgba(255,255,255,0.02)';
+            const color = isSelected ? 'white' : 'var(--text-main)';
+            const border = isSelected ? '1px solid var(--primary)' : '1px solid var(--border-color)';
+            
+            return `
+              <button class="sf-month-opt" data-month="${idx}" style="padding: 10px 6px; border-radius: 8px; border: ${border}; background: ${bg}; color: ${color}; font-weight: 700; font-size: 0.8rem; cursor: pointer; transition: all 0.2s;"
+                      onmouseover="${isSelected ? '' : "this.style.background='rgba(242,89,0,0.1)'; this.style.color='var(--primary)'; this.style.borderColor='var(--primary)';"}"
+                      onmouseout="${isSelected ? '' : "this.style.background='rgba(255,255,255,0.02)'; this.style.color='var(--text-main)'; this.style.borderColor='var(--border-color)';"}"
+              >
+                ${m}
+              </button>
+            `;
+          }).join('')}
+        </div>
+
+        <!-- Footer / Clear Filter -->
+        <button id="sf-clear-date-filter" style="width: 100%; padding: 8px; background: rgba(255,255,255,0.04); border: 1px dashed var(--border-color); border-radius: 8px; color: var(--text-muted); font-weight: 700; font-size: 0.8rem; cursor: pointer; transition: all 0.2s;"
+                onmouseover="this.style.background='rgba(239,68,68,0.08)'; this.style.color='#ef4444'; this.style.borderColor='#ef4444';"
+                onmouseout="this.style.background='rgba(255,255,255,0.04)'; this.style.color='var(--text-muted)'; this.style.borderColor='var(--border-color)';">
+          Clear Filter (All Time)
+        </button>
       </div>
     `;
   },
@@ -214,6 +328,35 @@ window.Pages.agents = {
       const parseD = d => { if (!d) return 0; const p = d.split('/'); return new Date(+p[2], +p[1]-1, +p[0]).getTime(); };
       return parseD(b.date) - parseD(a.date);
     });
+
+    // Filter displayed invoices by selected month & year
+    let displayedInvoices = [...allInvoices];
+    if (this.viewFilterMonth !== null && this.viewFilterYear !== null) {
+      displayedInvoices = allInvoices.filter(inv => {
+        if (!inv.date) return false;
+        const parts = inv.date.split('/');
+        if (parts.length === 3) {
+          const invMonth = parseInt(parts[1], 10) - 1; // 0-indexed
+          const invYear = parseInt(parts[2], 10);
+          return invMonth === this.viewFilterMonth && invYear === this.viewFilterYear;
+        }
+        return false;
+      });
+    }
+
+    // Dynamic metrics totals based on selected period
+    let selectedMonthTotal = 0;
+    displayedInvoices.forEach(inv => {
+      selectedMonthTotal += parseFloat(inv.totalSales) || 0;
+    });
+
+    const monthLabel = this.viewFilterMonth !== null && this.viewFilterYear !== null 
+      ? `${this.getMonthShortName(this.viewFilterMonth)} ${this.viewFilterYear}`
+      : 'This Month';
+    
+    const displayMonthTotal = this.viewFilterMonth !== null && this.viewFilterYear !== null
+      ? selectedMonthTotal
+      : agent.totalMonth;
 
     return `
       <div class="modal-overlay active">
@@ -236,8 +379,8 @@ window.Pages.agents = {
                 <div style="font-size: 1.2rem; font-weight: 900; color: #fffb00;">RM ${agent.totalYTD.toLocaleString(undefined, {minimumFractionDigits:2})}</div>
               </div>
               <div style="background: rgba(16,185,129,0.05); border: 1px solid rgba(16,185,129,0.2); border-radius: 10px; padding: 14px; text-align: center;">
-                <div style="font-size: 0.6rem; color: var(--text-muted); font-weight: 700; text-transform: uppercase; margin-bottom: 4px;">This Month</div>
-                <div style="font-size: 1.2rem; font-weight: 900; color: #10b981;">RM ${agent.totalMonth.toLocaleString(undefined, {minimumFractionDigits:2})}</div>
+                <div style="font-size: 0.6rem; color: var(--text-muted); font-weight: 700; text-transform: uppercase; margin-bottom: 4px;">${monthLabel}</div>
+                <div style="font-size: 1.2rem; font-weight: 900; color: #10b981;">RM ${displayMonthTotal.toLocaleString(undefined, {minimumFractionDigits:2})}</div>
               </div>
               <div style="background: rgba(242,89,0,0.05); border: 1px solid rgba(242,89,0,0.2); border-radius: 10px; padding: 14px; text-align: center;">
                 <div style="font-size: 0.6rem; color: var(--text-muted); font-weight: 700; text-transform: uppercase; margin-bottom: 4px;">Target</div>
@@ -245,8 +388,22 @@ window.Pages.agents = {
               </div>
             </div>
 
-            <!-- Invoice List -->
-            <h4 style="margin: 0 0 12px 0; font-size: 0.85rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">Invoice History</h4>
+            <!-- Invoice List Header with Month/Year Filter -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; position: relative;">
+              <h4 style="margin: 0; font-size: 0.85rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px;">Invoice History</h4>
+              
+              <!-- Month/Year Dropdown Filter -->
+              <div style="position: relative;" id="sf-date-filter-container">
+                <button id="sf-date-filter-trigger" style="display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: var(--bg-surface); border: 1.5px solid var(--border-color); border-radius: 8px; cursor: pointer; color: var(--text-main); font-weight: 700; font-size: 0.85rem; transition: all 0.2s; outline: none;"
+                        onmouseover="this.style.border='1.5px solid var(--primary)'" onmouseout="this.style.border='1.5px solid var(--border-color)'">
+                  📅 ${this.viewFilterMonth !== null && this.viewFilterYear !== null ? `${this.getMonthShortName(this.viewFilterMonth)} ${this.viewFilterYear}` : 'All Time'}
+                  <span style="font-size: 0.6rem; color: var(--primary); margin-left: 2px;">▼</span>
+                </button>
+                
+                ${this.isViewCalendarOpen ? this.renderMonthYearDropdown() : ''}
+              </div>
+            </div>
+
             <table style="width: 100%; border-collapse: collapse; text-align: left;">
               <thead>
                 <tr style="font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted);">
@@ -257,7 +414,7 @@ window.Pages.agents = {
                 </tr>
               </thead>
               <tbody>
-                ${allInvoices.map(inv => `
+                ${displayedInvoices.map(inv => `
                   <tr style="border-bottom: 1px solid var(--border-color);">
                     <td style="padding: 12px 8px; font-weight: 700;">${inv.id}</td>
                     <td style="padding: 12px 8px;">${inv.date}</td>
@@ -265,7 +422,7 @@ window.Pages.agents = {
                     <td style="padding: 12px 8px; text-align: right; font-weight: 700; color: var(--success);">RM ${(parseFloat(inv.totalSales) || 0).toFixed(2)}</td>
                   </tr>
                 `).join('')}
-                ${allInvoices.length === 0 ? '<tr><td colspan="4" style="padding: 30px; text-align: center; color: var(--text-muted);">No invoices found.</td></tr>' : ''}
+                ${displayedInvoices.length === 0 ? '<tr><td colspan="4" style="padding: 30px; text-align: center; color: var(--text-muted);">No invoices found.</td></tr>' : ''}
               </tbody>
             </table>
           </div>
@@ -320,6 +477,10 @@ window.Pages.agents = {
     document.querySelectorAll('.btn-sf-view').forEach(btn => {
       btn.onclick = () => {
         this.viewingAgent = btn.dataset.name;
+        this.viewFilterMonth = null;
+        this.viewFilterYear = null;
+        this.isViewCalendarOpen = false;
+        this.viewActiveYear = new Date().getFullYear();
         this.triggerUpdate();
       };
     });
@@ -334,7 +495,79 @@ window.Pages.agents = {
 
     // Close view modal
     const closeView = document.getElementById('btn-sf-close-view');
-    if (closeView) closeView.onclick = () => { this.viewingAgent = null; this.triggerUpdate(); };
+    if (closeView) {
+      closeView.onclick = () => { 
+        this.viewingAgent = null; 
+        this.viewFilterMonth = null;
+        this.viewFilterYear = null;
+        this.isViewCalendarOpen = false;
+        this.triggerUpdate(); 
+      };
+    }
+
+    // Date Filter Dropdown elements
+    const dateFilterTrigger = document.getElementById('sf-date-filter-trigger');
+    if (dateFilterTrigger) {
+      dateFilterTrigger.onclick = (e) => {
+        e.stopPropagation();
+        this.isViewCalendarOpen = !this.isViewCalendarOpen;
+        this.triggerUpdate();
+      };
+    }
+
+    const prevYear = document.getElementById('sf-prev-year');
+    if (prevYear) {
+      prevYear.onclick = (e) => {
+        e.stopPropagation();
+        this.viewActiveYear = (this.viewActiveYear || new Date().getFullYear()) - 1;
+        this.triggerUpdate();
+      };
+    }
+
+    const nextYear = document.getElementById('sf-next-year');
+    if (nextYear) {
+      nextYear.onclick = (e) => {
+        e.stopPropagation();
+        this.viewActiveYear = (this.viewActiveYear || new Date().getFullYear()) + 1;
+        this.triggerUpdate();
+      };
+    }
+
+    document.querySelectorAll('.sf-month-opt').forEach(opt => {
+      opt.onclick = (e) => {
+        e.stopPropagation();
+        this.viewFilterMonth = parseInt(opt.dataset.month, 10);
+        this.viewFilterYear = this.viewActiveYear || new Date().getFullYear();
+        this.isViewCalendarOpen = false;
+        this.triggerUpdate();
+      };
+    });
+
+    const clearDateFilter = document.getElementById('sf-clear-date-filter');
+    if (clearDateFilter) {
+      clearDateFilter.onclick = (e) => {
+        e.stopPropagation();
+        this.viewFilterMonth = null;
+        this.viewFilterYear = null;
+        this.isViewCalendarOpen = false;
+        this.triggerUpdate();
+      };
+    }
+
+    // Document click listener to close dropdown when clicking outside
+    if (this.isViewCalendarOpen) {
+      const dropdown = document.getElementById('sf-month-year-dropdown');
+      const trigger = document.getElementById('sf-date-filter-trigger');
+      
+      const outsideClickListener = (event) => {
+        if (dropdown && !dropdown.contains(event.target) && trigger && !trigger.contains(event.target)) {
+          this.isViewCalendarOpen = false;
+          this.triggerUpdate();
+          document.removeEventListener('click', outsideClickListener);
+        }
+      };
+      document.addEventListener('click', outsideClickListener);
+    }
 
     // Cancel edit modal
     const cancelEdit = document.getElementById('btn-sf-cancel-edit');
